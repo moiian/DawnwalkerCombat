@@ -1,6 +1,7 @@
 /work/
 /outputs/
 /build/
+/build-tools/
 /dist/
 /vcpkg_installed/
 /.vs/

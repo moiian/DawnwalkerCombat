@@ -38,3 +38,4 @@ install(FILES README.md LICENSE.md THIRD_PARTY_NOTICES.md DESTINATION docs/Dawnw
 install(FILES "${commonlibsse_SOURCE_DIR}/LICENSE" DESTINATION docs/DawnwalkerCombat/licenses RENAME CommonLibSSE-NG.txt)
 install(DIRECTORY "${VCPKG_INSTALLED_DIR}/x64-windows-static/share/fmt/" DESTINATION docs/DawnwalkerCombat/licenses/fmt FILES_MATCHING PATTERN copyright)
 install(DIRECTORY "${VCPKG_INSTALLED_DIR}/x64-windows-static/share/spdlog/" DESTINATION docs/DawnwalkerCombat/licenses/spdlog FILES_MATCHING PATTERN copyright)
+install(DIRECTORY "${VCPKG_INSTALLED_DIR}/x64-windows-static/share/rapidcsv/" DESTINATION docs/DawnwalkerCombat/licenses/rapidcsv FILES_MATCHING PATTERN copyright)

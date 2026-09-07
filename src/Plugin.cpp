@@ -181,7 +181,7 @@ private:
         std::int32_t current = -1;
         const RE::BSFixedString name(Variable);
         bool ok = player->GetGraphVariableInt(name, current);
-        if (ok && current != desired) {
+        if (ok && (current != desired || graphStatus != 1)) {
             ok = player->SetGraphVariableInt(name, desired) &&
                  player->GetGraphVariableInt(name, current) && current == desired;
         }

@@ -25,6 +25,20 @@ jobs:
           & "$vcpkg/bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "VCPKG_ROOT=$vcpkg" >> $env:GITHUB_ENV
+      - name: Use runner pkg-config instead of retired MSYS2 download
+        shell: pwsh
+        run: |
+          $candidates = @('C:/msys64/mingw64/bin/pkg-config.exe', 'C:/msys64/ucrt64/bin/pkg-config.exe')
+          $pkg = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$pkg) {
+            choco install pkgconfiglite --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $pkg = (Get-Command pkg-config.exe -ErrorAction Stop).Source
+          }
+          & $pkg --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "PKG_CONFIG=$pkg" >> $env:GITHUB_ENV
+          'VCPKG_KEEP_ENV_VARS=PKG_CONFIG' >> $env:GITHUB_ENV
       - name: Configure
         run: cmake --preset windows-release
       - name: Build DLL and input tests
