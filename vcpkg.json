@@ -1,0 +1,6 @@
+{
+  "name": "dawnwalker-combat",
+  "version-semver": "0.1.0",
+  "description": "Skyrim 1.6.1170 directional input SKSE plugin",
+  "dependencies": ["fmt", "spdlog", "rapidcsv"]
+}

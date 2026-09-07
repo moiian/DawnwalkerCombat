@@ -1,0 +1,8 @@
+/work/
+/outputs/
+/build/
+/dist/
+/vcpkg_installed/
+/.vs/
+/CMakeUserPresets.json
+*.user

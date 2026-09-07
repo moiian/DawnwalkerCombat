@@ -1,0 +1,49 @@
+name: Windows DLL
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get versioned vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: 2023.10.19
+          path: build-tools/vcpkg
+      - name: Bootstrap dependencies
+        shell: pwsh
+        run: |
+          $vcpkg = Join-Path $env:GITHUB_WORKSPACE 'build-tools/vcpkg'
+          & "$vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$vcpkg" >> $env:GITHUB_ENV
+      - name: Configure
+        run: cmake --preset windows-release
+      - name: Build DLL and input tests
+        run: cmake --build --preset windows-release --parallel 3
+      - name: Test direction rules
+        run: ctest --preset windows-release
+      - name: Package MO2 mod
+        shell: pwsh
+        run: |
+          cmake --install build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dll = Get-Item dist/SKSE/Plugins/DawnwalkerCombat.dll
+          if ($dll.Length -lt 10000) { throw 'Missing or empty DLL' }
+          Copy-Item build/Release/DawnwalkerCombat.pdb dist/SKSE/Plugins/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/* -DestinationPath DawnwalkerCombat-0.1.0-MO2.zip
+      - name: Upload installable archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: DawnwalkerCombat-0.1.0-MO2
+          path: DawnwalkerCombat-0.1.0-MO2.zip
+          if-no-files-found: error
+          retention-days: 30
