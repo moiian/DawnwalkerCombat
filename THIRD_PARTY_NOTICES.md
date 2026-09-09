@@ -12,5 +12,8 @@
   https://github.com/max-su-2019/BehaviorDataInjector/blob/master/doc/How%20to%20create%20BDI%20config%20files.md
 - OAR: external runtime consumer; our optional configs use its CompareValues
   format and do not include OAR source or binary code.
-- DMK/Direction-Movement was suggested as an API reference only. Its source was
-  not copied, adapted or used to implement this milestone.
+- DMK/Direction-Movement: https://github.com/vinymayan/Direction-Movement.
+  Its author gave the project owner permission to adapt the code under MIT.
+  It is a reference for input and game-window focus handling. This source tree
+  does not redistribute DMK's assets or its full source tree. Any future
+  substantial adaptation will retain this attribution and the MIT notice.

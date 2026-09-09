@@ -111,5 +111,6 @@ simulate Skyrim. Roll back by disabling the input mod and the optional OAR overl
 `src/Direction.h` holds the portable state machine; `src/Plugin.cpp` adapts Skyrim
 input, menus and SKSE lifecycle events. `tests/DirectionTests.cpp` covers direction
 rules, release semantics, mixed input, deadzone, hysteresis and invalid samples.
-See LICENSE.md for the pending original-code license decision and
-THIRD_PARTY_NOTICES.md for dependencies. DMK source is not included or adapted.
+The project is MIT licensed; see LICENSE.md and THIRD_PARTY_NOTICES.md. DMK
+(Direction-Movement) is an MIT-authorized reference for input and focus handling;
+its assets and full source tree are not included.
