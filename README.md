@@ -1,8 +1,9 @@
-# DawnwalkerCombat — milestone 1 (0.1.0)
+# DawnwalkerCombat — milestones 1–2 (0.1.0)
 
 Private SKSE input-direction prototype for **Skyrim SE/AE Steam 1.6.1170**.
-This is an input/animation-variable milestone, not a complete combat system.
-No block detection, stamina, attack-direction lock, movement lock or NPC AI.
+This is an input/animation-variable prototype with a minimal player-blocking
+locomotion suppression hook, not a complete combat system. It has no stamina,
+attack-direction lock, damage/block resolution, Perfect Block, or NPC AI.
 
 ## Output and rules
 
@@ -42,6 +43,14 @@ new graph variable through `SetGraphVariableInt`.
 - Logs are state-based: at most 10 input lines/sec during fast changes, at most
   2 raw-axis-only lines/sec, no static per-frame spam. Reset and graph availability
   transitions are separately logged. Logs are not a full event trace.
+- At `kDataLoaded`, the DLL also hooks player `MovementHandler::ProcessButton`
+  (vtable slot 4) and `MovementHandler::ProcessThumbstick` (slot 2). Each hook
+  calls vanilla first, then, only while `PlayerCharacter::IsBlocking()` is true,
+  clears only `PlayerControlsData::moveInputVec`. It does not consume the
+  keyboard/stick event, change `lookInputVec`, clear the controls object, or
+  touch attack, bash, camera, turning, root motion, stagger, or knockback.
+  The Step 1 raw input sink therefore continues to publish `DW_InputDirection`
+  for OAR while ordinary blocking locomotion is suppressed.
 
 ## Runtime requirements
 
@@ -99,7 +108,12 @@ prepared OAR config overlay only after verifying the graph variable in game.
 6. For an independent BDI check, select the player with `prid 14` in the console,
    then use BDI's `DGV DW_InputDirection i`. Opening the console intentionally
    resets input, so seeing **0 in the console is expected**, not a direction test.
-7. Only after the above passes, migrate OAR `CompareValues`: Value A graph
+7. While blocking, test both WASD and the left stick: the player must not
+   translate while the OAR block direction still changes. On block release,
+   movement must resume immediately. Also test camera/turning, attack/bash,
+   attack-to-block, block-to-attack, stagger, menu/load/Alt-Tab, and the Step 1
+   keyboard/gamepad/neutral cases for stuck movement or input regressions.
+8. Only after the above passes, migrate OAR `CompareValues`: Value A graph
    variable `DW_InputDirection`, type `Int`, comparison `==`, Value B 1/2/3/4
    (0 for neutral). Preserve all non-direction conditions, priority and blend
    settings. Stances stay interruptible; BFCO attacks stay non-interruptible.

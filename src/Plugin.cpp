@@ -1,5 +1,7 @@
 #include "Direction.h"
 #include <RE/M/Main.h>
+#include <RE/M/MovementHandler.h>
+#include <RE/P/PlayerControlsData.h>
 #include <RE/R/Renderer.h>
 #include <RE/T/ThumbstickEvent.h>
 #include <Windows.h>
@@ -65,6 +67,59 @@ const char* DeviceName(DW::Device device)
     }
 }
 
+class MovementHook final
+{
+public:
+    static void Install()
+    {
+        if (installed) return;
+
+        REL::Relocation<std::uintptr_t> vtable{RE::VTABLE_MovementHandler[0]};
+        originalThumbstick = reinterpret_cast<ThumbstickFn>(vtable.write_vfunc(2, ProcessThumbstick));
+        originalButton = reinterpret_cast<ButtonFn>(vtable.write_vfunc(4, ProcessButton));
+        installed = true;
+        spdlog::info("MovementHandler hook active; blocking suppresses player moveInputVec only");
+    }
+
+private:
+    using ThumbstickFn = void (*)(RE::MovementHandler*, RE::ThumbstickEvent*, RE::PlayerControlsData*);
+    using ButtonFn = void (*)(RE::MovementHandler*, RE::ButtonEvent*, RE::PlayerControlsData*);
+
+    static void ProcessThumbstick(RE::MovementHandler* a_handler, RE::ThumbstickEvent* a_event,
+        RE::PlayerControlsData* a_data)
+    {
+        originalThumbstick(a_handler, a_event, a_data);
+        SuppressPlayerLocomotion(a_data);
+    }
+
+    static void ProcessButton(RE::MovementHandler* a_handler, RE::ButtonEvent* a_event,
+        RE::PlayerControlsData* a_data)
+    {
+        originalButton(a_handler, a_event, a_data);
+        SuppressPlayerLocomotion(a_data);
+    }
+
+    static void SuppressPlayerLocomotion(RE::PlayerControlsData* a_data)
+    {
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        // MovementHandler is the player input handler. Raw input has already been
+        // observed by Controller::ProcessEvent, and vanilla has already processed
+        // this event, so this leaves DW_InputDirection, camera input, and all
+        // non-movement button handling intact.
+        const bool suppress = a_data && player && player->IsBlocking();
+        if (suppress) a_data->moveInputVec = {0.0F, 0.0F};
+        if (suppress != suppressionActive) {
+            suppressionActive = suppress;
+            spdlog::info("movement suppression={}", suppress ? "active" : "inactive");
+        }
+    }
+
+    inline static ThumbstickFn originalThumbstick;
+    inline static ButtonFn originalButton;
+    inline static bool installed{false};
+    inline static bool suppressionActive{false};
+};
+
 class Controller final : public RE::BSTEventSink<RE::InputEvent*>,
                          public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 {
@@ -96,6 +151,7 @@ public:
         }
         ui->AddEventSink<RE::MenuOpenCloseEvent>(this);
         runtimeStarted = true;
+        MovementHook::Install();
         InstallFocusSubclass();
         spdlog::info("Menu sink active; focus reset uses WM_ACTIVATEAPP window subclass");
     }
