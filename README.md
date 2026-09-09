@@ -33,11 +33,10 @@ new graph variable through `SetGraphVariableInt`.
   state. Held keyboard repeat events do not restore a key after reset; release
   and press again. A new stick event after returning to gameplay can select its
   current direction. HUD overlays that do not consume input do not block it.
-- Reset/watchdog checks run on the game thread via bounded SKSE tasks, scheduled
-  about every 16 ms. Focus loss is latched by the worker even if game execution
-  pauses while unfocused; the graph is cleared when the game thread next runs.
-  No game objects are accessed by the worker. Input event updates are not delayed
-  by this watchdog or by the log limiter.
+- Input sinks register at SKSE `kInputLoaded`. A small background watcher checks
+  foreground focus every 100 ms and queues exactly one game-thread reset on a
+  focus-loss transition. It never reads game objects. Direction writes queue only
+  when the output changes; they are not driven by a 60 Hz task loop.
 - Logs are state-based: at most 10 input lines/sec during fast changes, at most
   2 raw-axis-only lines/sec, no static per-frame spam. Reset and graph availability
   transitions are separately logged. Logs are not a full event trace.

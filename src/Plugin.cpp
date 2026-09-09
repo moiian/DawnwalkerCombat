@@ -1,4 +1,5 @@
 #include "Direction.h"
+#include <RE/T/ThumbstickEvent.h>
 #include <Windows.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <atomic>
@@ -61,29 +62,47 @@ public:
     // thread destructor under the Windows loader lock at process exit.
     static Controller& Get() { static auto instance = new Controller; return *instance; }
 
-    void Start()
+    void StartInput()
     {
-        if (started) return;
-        started = true;
-        RE::BSInputDeviceManager::GetSingleton()->AddEventSink(this);
-        RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(this);
+        if (inputSinkRegistered) return;
+        const auto input = RE::BSInputDeviceManager::GetSingleton();
+        if (!input) {
+            spdlog::error("Input device manager was unavailable at kInputLoaded");
+            return;
+        }
+        input->AddEventSink(this);
+        inputSinkRegistered = true;
+        spdlog::info("Input sink active; W/A/S/D and left stick; deadzone={} axis_ratio={}",
+            DW::InputState::Deadzone, DW::InputState::AxisRatio);
+    }
+
+    void StartRuntime()
+    {
+        if (runtimeStarted) return;
+        const auto ui = RE::UI::GetSingleton();
         const auto tasks = SKSE::GetTaskInterface();
-        // No RE/game object is read from this thread. At most one main-thread
-        // task can be pending, including while the game is paused/unfocused.
-        std::thread([this, tasks] {
+        if (!ui || !tasks) {
+            spdlog::error("UI or task interface was unavailable at kDataLoaded");
+            return;
+        }
+        ui->AddEventSink<RE::MenuOpenCloseEvent>(this);
+        runtimeStarted = true;
+        // The worker only detects foreground transitions. Every RE object and
+        // animation-graph write remains in the game-thread task it submits.
+        std::thread([this, tasks, focused = HasFocus()]() mutable {
             while (true) {
-                if (!HasFocus()) focusLost.store(true);
-                if (!taskPending.exchange(true)) {
+                const bool nowFocused = HasFocus();
+                if (focused && !nowFocused && !focusResetQueued.exchange(true)) {
                     tasks->AddTask([this] {
-                        Tick();
-                        taskPending.store(false);
+                        focusResetQueued.store(false);
+                        Reset("focus-lost");
                     });
                 }
-                std::this_thread::sleep_for(16ms);
+                focused = nowFocused;
+                std::this_thread::sleep_for(100ms);
             }
         }).detach();
-        spdlog::info("Input sinks active; W/A/S/D and left stick; deadzone={} axis_ratio={}",
-            DW::InputState::Deadzone, DW::InputState::AxisRatio);
+        spdlog::info("Menu sink and focus-edge watcher active");
     }
 
     void BeginLoad()
@@ -96,17 +115,17 @@ public:
     void FinishLoad()
     {
         loading = false;
-        Reset("new/post-load");
-        blocked = true;
         graphStatus = -1;
         nextGraphCheck = {};
+        Reset("new/post-load");
+        blocked = true;
     }
 
     RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* events,
         RE::BSTEventSource<RE::InputEvent*>*) override
     {
-        Tick(); // also handles null/empty event batches
-        if (blocked || !events) return RE::BSEventNotifyControl::kContinue;
+        if (!events || InputBlocked()) return RE::BSEventNotifyControl::kContinue;
+        const auto before = state.Value();
         for (auto event = *events; event; event = event->next) {
             if (event->GetDevice() == RE::INPUT_DEVICE::kGamepad &&
                 event->GetEventType() == RE::INPUT_EVENT_TYPE::kDeviceConnect) {
@@ -121,12 +140,15 @@ public:
                 // Held repeats after a menu/focus/load reset must not restore a key.
                 if (button->IsDown()) state.Key(direction, true);
                 else if (!button->IsPressed()) state.Key(direction, false);
-            } else if (const auto stick = event->AsThumbstickEvent();
-                       stick && event->GetDevice() == RE::INPUT_DEVICE::kGamepad && stick->IsLeft()) {
-                state.Stick(stick->xValue, stick->yValue);
+            } else if (event->GetDevice() == RE::INPUT_DEVICE::kGamepad &&
+                       event->GetEventType() == RE::INPUT_EVENT_TYPE::kThumbstick) {
+                // CommonLibSSE-NG v3.7.0 has no AsThumbstickEvent helper.
+                // kThumbstick is the engine's type discriminator for this cast.
+                const auto stick = static_cast<const RE::ThumbstickEvent*>(event);
+                if (stick->IsLeft()) state.Stick(stick->xValue, stick->yValue);
             }
         }
-        Publish(); // no smoothing/debounce on actual graph updates or neutral
+        if (state.Value() != before) QueuePublish();
         LogInput();
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -147,18 +169,21 @@ public:
     }
 
 private:
-    void Tick()
+    [[nodiscard]] bool InputBlocked()
     {
-        const bool lost = focusLost.exchange(false);
         const bool nowBlocked = loading || !HasFocus() || MenuBlocksInput();
-        if (lost || (nowBlocked && !blocked)) Reset(lost ? "focus-lost" : "menu/loading");
+        if (nowBlocked && !blocked) Reset("menu/loading");
         blocked = nowBlocked;
-        const auto input = RE::BSInputDeviceManager::GetSingleton();
-        const bool connected = input && input->IsGamepadEnabled();
-        if (wasConnected && !connected) Reset("gamepad-disconnected-or-disabled");
-        wasConnected = connected;
-        Publish(); // reassert after graph recreation, even with no new input
-        LogInput();
+        return nowBlocked;
+    }
+
+    void QueuePublish()
+    {
+        if (loading || publishQueued.exchange(true)) return;
+        SKSE::GetTaskInterface()->AddTask([this] {
+            publishQueued.store(false);
+            Publish();
+        });
     }
 
     void Reset(const char* reason)
@@ -212,8 +237,9 @@ private:
     }
 
     DW::InputState state;
-    std::atomic_bool taskPending{false}, focusLost{false};
-    bool started{false}, loading{true}, blocked{true}, wasConnected{false};
+    std::atomic_bool publishQueued{false}, focusResetQueued{false};
+    bool inputSinkRegistered{false}, runtimeStarted{false};
+    bool loading{true}, blocked{true};
     int graphStatus{-1};
     Clock::time_point nextGraphCheck{}, nextLog{}, nextAxisLog{};
     DW::Direction loggedDirection{DW::Direction::None};
@@ -224,7 +250,8 @@ private:
 void OnMessage(SKSE::MessagingInterface::Message* message)
 {
     switch (message->type) {
-    case SKSE::MessagingInterface::kDataLoaded: Controller::Get().Start(); break;
+    case SKSE::MessagingInterface::kInputLoaded: Controller::Get().StartInput(); break;
+    case SKSE::MessagingInterface::kDataLoaded: Controller::Get().StartRuntime(); break;
     case SKSE::MessagingInterface::kPreLoadGame: Controller::Get().BeginLoad(); break;
     case SKSE::MessagingInterface::kPostLoadGame:
     case SKSE::MessagingInterface::kNewGame: Controller::Get().FinishLoad(); break;
