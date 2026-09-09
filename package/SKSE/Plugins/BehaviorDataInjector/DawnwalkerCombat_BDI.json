@@ -4,5 +4,11 @@
     "type": "kInt",
     "name": "DW_InputDirection",
     "value": 0
+  },
+  {
+    "projectPath": "Actors\\Character",
+    "type": "kInt",
+    "name": "DW_AttackDirection",
+    "value": 0
   }
 ]

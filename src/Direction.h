@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -80,5 +81,42 @@ private:
     std::array<std::uint64_t, 5> keys{};
     std::uint64_t serial{0};
     Direction stick{Direction::None};
+};
+
+// Per-attack-segment direction latch. It deliberately has no timer or tick:
+// input events decide whether they arrive within the short selection window.
+class AttackDirectionState
+{
+public:
+    static constexpr auto kAttackDirectionWindow = std::chrono::milliseconds{200};
+
+    void Begin(Direction a_currentInput, std::chrono::steady_clock::time_point a_now)
+    {
+        active = true;
+        startedAt = a_now;
+        direction = a_currentInput;
+    }
+
+    bool Update(Direction a_newInput, std::chrono::steady_clock::time_point a_now)
+    {
+        if (!active || a_newInput == Direction::None) return false;
+        if (a_now - startedAt > kAttackDirectionWindow || direction == a_newInput) return false;
+        direction = a_newInput;
+        return true;
+    }
+
+    void End()
+    {
+        active = false;
+        direction = Direction::None;
+    }
+
+    [[nodiscard]] bool Active() const { return active; }
+    [[nodiscard]] Direction Value() const { return direction; }
+
+private:
+    bool active{false};
+    std::chrono::steady_clock::time_point startedAt{};
+    Direction direction{Direction::None};
 };
 }

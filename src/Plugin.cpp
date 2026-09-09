@@ -15,7 +15,8 @@ using namespace std::chrono_literals;
 namespace
 {
 constexpr REL::Version TargetRuntime{1, 6, 1170, 0};
-constexpr const char* Variable = "DW_InputDirection";
+constexpr const char* InputVariable = "DW_InputDirection";
+constexpr const char* AttackVariable = "DW_AttackDirection";
 constexpr UINT_PTR FocusSubclassId = 0x44574301; // "DWC" + implementation revision
 using Clock = std::chrono::steady_clock;
 
@@ -217,7 +218,8 @@ private:
 };
 
 class Controller final : public RE::BSTEventSink<RE::InputEvent*>,
-                         public RE::BSTEventSink<RE::MenuOpenCloseEvent>
+                         public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
+                         public RE::BSTEventSink<RE::BSAnimationGraphEvent>
 {
 public:
     static Controller& Get() { static auto instance = new Controller; return *instance; }
@@ -249,6 +251,7 @@ public:
         runtimeStarted = true;
         MovementHook::Install();
         AnimationMotionHook::Install();
+        RegisterAttackEvents();
         InstallFocusSubclass();
         spdlog::info("Menu sink active; focus reset uses WM_ACTIVATEAPP window subclass");
     }
@@ -269,6 +272,7 @@ public:
         Reset("new/post-load");
         AnimationMotionHook::Reset("new/post-load");
         AnimationMotionHook::RegisterEvents();
+        RegisterAttackEvents();
         blocked = true;
         if (runtimeStarted) InstallFocusSubclass();
     }
@@ -300,7 +304,11 @@ public:
                 if (stick->IsLeft()) state.Stick(stick->xValue, stick->yValue);
             }
         }
-        if (state.Value() != before) QueuePublish();
+        const auto current = state.Value();
+        if (current != before) {
+            UpdateAttackDirection(current, Clock::now());
+            QueuePublish();
+        }
         LogInput();
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -320,6 +328,20 @@ public:
         return RE::BSEventNotifyControl::kContinue;
     }
 
+    RE::BSEventNotifyControl ProcessEvent(const RE::BSAnimationGraphEvent* event,
+        RE::BSTEventSource<RE::BSAnimationGraphEvent>*) override
+    {
+        if (!event) return RE::BSEventNotifyControl::kContinue;
+
+        const std::string_view tag{event->tag.c_str()};
+        if (tag == "BFCO_PlayerAttackStart") {
+            BeginAttackSegment(tag);
+        } else if (tag == "attackStop" || tag == "EndAnimatedCamera") {
+            EndAttackSegment(tag);
+        }
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
 private:
     [[nodiscard]] bool InputBlocked()
     {
@@ -327,6 +349,43 @@ private:
         if (nowBlocked && !blocked) Reset("menu/loading");
         blocked = nowBlocked;
         return nowBlocked;
+    }
+
+    void RegisterAttackEvents()
+    {
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        if (!player) return;
+        player->RemoveAnimationGraphEventSink(this);
+        if (player->AddAnimationGraphEventSink(this)) {
+            spdlog::info("attack-direction animation event sink active");
+        } else {
+            spdlog::debug("attack-direction animation event sink registration deferred");
+        }
+    }
+
+    void BeginAttackSegment(std::string_view event)
+    {
+        const auto input = state.Value();
+        attackDirection.Begin(input, Clock::now());
+        ++attackSegmentSerial;
+        spdlog::info("segment-start candidate event={} serial={} input_direction={} attack_direction={}",
+            event, attackSegmentSerial, static_cast<int>(input), static_cast<int>(attackDirection.Value()));
+        Publish();
+    }
+
+    void UpdateAttackDirection(DW::Direction input, Clock::time_point now)
+    {
+        if (!attackDirection.Update(input, now)) return;
+        spdlog::info("attack-direction update serial={} input_direction={} attack_direction={}",
+            attackSegmentSerial, static_cast<int>(input), static_cast<int>(attackDirection.Value()));
+    }
+
+    void EndAttackSegment(std::string_view event)
+    {
+        if (!attackDirection.Active()) return;
+        attackDirection.End();
+        spdlog::info("segment-end event={} serial={}", event, attackSegmentSerial);
+        Publish();
     }
 
     void QueuePublish()
@@ -429,6 +488,7 @@ private:
     {
         const bool hadInput = state.Value() != DW::Direction::None || state.device != DW::Device::None;
         state.Reset();
+        attackDirection.End();
         Publish();
         if (hadInput) spdlog::info("reset={} device=none raw_x=0 raw_y=0 direction=0", reason);
     }
@@ -441,20 +501,29 @@ private:
         const auto now = Clock::now();
         if (graphStatus == 0 && now < nextGraphCheck) return;
         nextGraphCheck = now + 500ms;
-        const auto desired = static_cast<std::int32_t>(state.Value());
+        const auto input = static_cast<std::int32_t>(state.Value());
+        const auto attack = static_cast<std::int32_t>(attackDirection.Value());
+        const bool ok = WriteGraphVariable(player, InputVariable, input) &&
+                        WriteGraphVariable(player, AttackVariable, attack);
+        const int newStatus = ok ? 1 : 0;
+        if (newStatus != graphStatus) {
+            if (ok) spdlog::info("graph variables verified: {}={} {}={} (read/write)",
+                InputVariable, input, AttackVariable, attack);
+            else spdlog::warn("{} or {} unavailable/write failed; enable compatible Behavior Data Injector + DawnwalkerCombat_BDI.json. Input logs alone do NOT prove OAR works.", InputVariable, AttackVariable);
+            graphStatus = newStatus;
+        }
+    }
+
+    bool WriteGraphVariable(RE::PlayerCharacter* player, const char* variable, std::int32_t desired)
+    {
         std::int32_t current = -1;
-        const RE::BSFixedString name(Variable);
+        const RE::BSFixedString name(variable);
         bool ok = player->GetGraphVariableInt(name, current);
         if (ok && (current != desired || graphStatus != 1)) {
             ok = player->SetGraphVariableInt(name, desired) &&
                  player->GetGraphVariableInt(name, current) && current == desired;
         }
-        const int newStatus = ok ? 1 : 0;
-        if (newStatus != graphStatus) {
-            if (ok) spdlog::info("graph variable verified: {}={} (read/write)", Variable, desired);
-            else spdlog::warn("{} unavailable/write failed; enable compatible Behavior Data Injector + DawnwalkerCombat_BDI.json. Input logs alone do NOT prove OAR works.", Variable);
-            graphStatus = newStatus;
-        }
+        return ok;
     }
 
     void LogInput()
@@ -476,6 +545,8 @@ private:
     }
 
     DW::InputState state;
+    DW::AttackDirectionState attackDirection;
+    std::uint32_t attackSegmentSerial{0};
     std::atomic_bool publishQueued{false}, focusResetQueued{false}, focusInstallQueued{false},
         focusWarningLogged{false};
     HWND focusWindow{nullptr};
@@ -502,7 +573,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message)
 }
 
 SKSEPluginInfo(
-    .Version = {0, 1, 0, 0},
+    .Version = {0, 2, 0, 0},
     .Name = "DawnwalkerCombat",
     .Author = "moiian",
     .RuntimeCompatibility = SKSE::PluginDeclaration::RuntimeCompatibility{TargetRuntime}
@@ -526,7 +597,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
         SKSE::Init(skse);
         SKSE::AllocTrampoline(14);
         if (!SKSE::GetTaskInterface() || !SKSE::GetMessagingInterface()->RegisterListener(OnMessage)) return false;
-        spdlog::info("DawnwalkerCombat 0.1.0 loaded for Skyrim 1.6.1170; raw axes are engine-normalized before DW deadzone, not physical ADC values");
+        spdlog::info("DawnwalkerCombat 0.2.0 loaded for Skyrim 1.6.1170; raw axes are engine-normalized before DW deadzone, not physical ADC values");
         return true;
     } catch (const std::exception&) {
         return false;

@@ -30,12 +30,16 @@ foreach ($direction in $map.Keys) {
             }
         }
         $otherConditions=@($config.conditions | Where-Object { $_.'Value A'.graphVariable -notin $graphNames })
+        $graphVariable=if ($suffix -eq '-Attacks') { 'DW_AttackDirection' } else { 'DW_InputDirection' }
         $config.conditions=@($otherConditions) + @([ordered]@{
             condition='CompareValues'; requiredVersion='1.0.0.0'
-            'Value A'=[ordered]@{graphVariable='DW_InputDirection';graphVariableType='Int'}
+            'Value A'=[ordered]@{graphVariable=$graphVariable;graphVariableType='Int'}
             Comparison='=='
             'Value B'=[ordered]@{value=[int]$map[$direction][1]}
         })
+        if ($suffix -eq '-Attacks') {
+            $config.interruptible=$true
+        }
         $relative="meshes/actors/Character/animations/OpenAnimationReplacer/Dawnwalker combat/$folder"
         $target=Join-Path $destinationRoot $relative
         New-Item -ItemType Directory -Force -Path $target | Out-Null

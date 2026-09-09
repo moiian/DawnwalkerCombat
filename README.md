@@ -1,16 +1,17 @@
-# DawnwalkerCombat — milestones 1–2 (0.1.0)
+# DawnwalkerCombat — milestones 1–3 (0.2.0)
 
 Private SKSE input-direction prototype for **Skyrim SE/AE Steam 1.6.1170**.
 This is an input/animation-variable prototype with a minimal player-blocking
 locomotion suppression hook, not a complete combat system. It has no stamina,
-attack-direction lock, damage/block resolution, Perfect Block, or NPC AI.
+damage/block resolution, Perfect Block, or NPC AI.
 
 ## Output and rules
 
-The player graph integer `DW_InputDirection` is `0` neutral, `1` up, `2` right,
-`3` down, `4` left. The package's BDI JSON creates this variable; the DLL updates
-it and checks graph read/write results. A DLL alone cannot create an arbitrary
-new graph variable through `SetGraphVariableInt`.
+The player graph integers `DW_InputDirection` and `DW_AttackDirection` use
+`0` neutral, `1` up, `2` right, `3` down, `4` left. The package's BDI JSON
+creates both variables; the DLL updates them and checks graph read/write results.
+A DLL alone cannot create an arbitrary new graph variable through
+`SetGraphVariableInt`.
 
 - Physical W/D/S/A keys map to 1/2/3/4. Among held direction keys, the most recent
   **press** wins (including opposite pairs). Repeated hold events do not count as
@@ -70,6 +71,20 @@ new graph variable through `SetGraphVariableInt`.
   locomotion deceleration after `moveInputVec` is cleared. This milestone does
   not manipulate velocity, the CharacterController, Havok, or other movement
   state; any further investigation requires a separate runtime/architecture task.
+- `BFCO_PlayerAttackStart` is the sole attack-segment start candidate. Every
+  occurrence starts a new segment, snapshots the current input (including 0),
+  and opens a 200 ms selection window. During that window, only a non-neutral
+  *new* input direction updates `DW_AttackDirection`; neutral leaves the prior
+  choice untouched. No tick, callback, timer, or thread runs at expiry: later
+  input events simply fail the `steady_clock` window check and the direction
+  stays frozen.
+- `attackStop` and `EndAnimatedCamera` are idempotent segment-end gates. They
+  clear the active state and set `DW_AttackDirection` to 0. A subsequent
+  `BFCO_PlayerAttackStart` always reinitializes the segment even if an end event
+  did not arrive, so BFCO combo stages do not share a window or direction.
+- The log records `segment-start candidate` and `segment-end` with a serial.
+  Runtime qualification must prove one `BFCO_PlayerAttackStart` per visible
+  BFCO combo segment before this lifecycle is treated as fully confirmed.
 
 ## Runtime requirements
 
@@ -88,9 +103,9 @@ No behavior regeneration is required for this BDI variable.
 
 Push to `main` or open **Actions → Windows DLL → Run workflow**. Windows Server
 2022 builds an x64 Release DLL, runs the shared C++ direction tests and packages
-the mod. Download the **DawnwalkerCombat-0.1.0-MO2** artifact from the successful
+the mod. Download the **DawnwalkerCombat-0.2.0-MO2** artifact from the successful
 run, extract GitHub's outer artifact ZIP, then install the inner
-`DawnwalkerCombat-0.1.0-MO2.zip` in MO2.
+`DawnwalkerCombat-0.2.0-MO2.zip` in MO2.
 
 The CMake preset requires CMake 3.28+, consumes CommonLibSSE-NG tag v3.7.0 and vcpkg tag 2023.10.19,
 with a static MSVC runtime. The repository contains no game files or credentials.
@@ -132,10 +147,17 @@ prepared OAR config overlay only after verifying the graph variable in game.
    movement must resume immediately. Also test camera/turning, attack/bash,
    attack-to-block, block-to-attack, stagger, menu/load/Alt-Tab, and the Step 1
    keyboard/gamepad/neutral cases for stuck movement or input regressions.
-8. Only after the above passes, migrate OAR `CompareValues`: Value A graph
-   variable `DW_InputDirection`, type `Int`, comparison `==`, Value B 1/2/3/4
-   (0 for neutral). Preserve all non-direction conditions, priority and blend
-   settings. Stances stay interruptible; BFCO attacks stay non-interruptible.
+8. Only after the above passes, generate the OAR overlay. Stance replacements
+   retain `DW_InputDirection`; attack replacements use `DW_AttackDirection` and
+   `interruptible: true`, so OAR can re-evaluate within the 200 ms window but
+   sees a frozen value afterwards. Preserve all other conditions, priority and
+   blend settings.
+9. Qualify one press, 2-hit and 3-hit combos, a stopped combo, and
+   attack-to-block. Confirm the log contains exactly one `BFCO_PlayerAttackStart`
+   candidate per visible segment, each segment gets its own window, and
+   `attackStop` or `EndAnimatedCamera` clears the attack graph variable on
+   cancel/interrupt. If that event mapping fails, stop and report the log
+   sequence; do not substitute another attack-start event.
 
 The first game run, controller mapping, window-focus reset, and actual OAR
 transition timing must be validated on the user's mod stack. Cloud CI cannot

@@ -1,10 +1,12 @@
 #include "Direction.h"
 #include <cstdlib>
+#include <chrono>
 #include <iostream>
 #include <limits>
 
 using DW::Direction;
 using DW::InputState;
+using DW::AttackDirectionState;
 int checks = 0;
 void Check(bool ok, const char* label)
 {
@@ -51,6 +53,23 @@ int main()
     Check(s.Value() == None, "NaN rejected");
     s.Stick(0, std::numeric_limits<float>::infinity());
     Check(s.Value() == None, "infinite rejected");
+
+    AttackDirectionState attack;
+    const auto start = std::chrono::steady_clock::time_point{};
+    attack.Begin(Left, start);
+    Check(attack.Active() && attack.Value() == Left, "attack segment snapshots input");
+    Check(!attack.Update(None, start + std::chrono::milliseconds{50}) && attack.Value() == Left,
+        "neutral does not clear attack direction");
+    Check(attack.Update(Right, start + std::chrono::milliseconds{200}) && attack.Value() == Right,
+        "attack direction changes at window boundary");
+    Check(!attack.Update(Left, start + std::chrono::milliseconds{201}) && attack.Value() == Right,
+        "attack direction freezes after window");
+    attack.End();
+    Check(!attack.Active() && attack.Value() == None, "attack end clears direction");
+    attack.Begin(None, start + std::chrono::seconds{1});
+    Check(attack.Value() == None, "new neutral segment does not inherit direction");
+    Check(attack.Update(Up, start + std::chrono::milliseconds{1100}) && attack.Value() == Up,
+        "neutral segment accepts direction in window");
     for (int deg = 0; deg < 360; ++deg) {
         const float a = deg * 3.14159265F / 180;
         const auto v = InputState::Classify(std::cos(a), std::sin(a), None);
