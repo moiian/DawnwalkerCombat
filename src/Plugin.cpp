@@ -9,6 +9,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <atomic>
 #include <chrono>
+#include <string_view>
 
 using namespace std::chrono_literals;
 namespace
@@ -120,6 +121,154 @@ private:
     inline static bool suppressionActive{false};
 };
 
+class AttackToBlockCancel final : public RE::BSTEventSink<RE::BSAnimationGraphEvent>
+{
+public:
+    static AttackToBlockCancel& Get()
+    {
+        static auto instance = new AttackToBlockCancel;
+        return *instance;
+    }
+
+    void Register()
+    {
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        if (!player || registered) return;
+
+        player->RemoveAnimationGraphEventSink(this);
+        registered = player->AddAnimationGraphEventSink(this);
+        if (registered) spdlog::info("attack-to-block animation event sink active");
+        else spdlog::warn("attack-to-block animation event sink registration failed");
+    }
+
+    void Reset(const char* a_reason)
+    {
+        if (!active) return;
+        active = false;
+        cancelMotionLogged = false;
+        spdlog::info("attack-to-block cancel active=false reason={}", a_reason);
+    }
+
+    [[nodiscard]] bool Active() const { return active; }
+
+    void ObserveMotion(const RE::NiPoint3* a_translation)
+    {
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        if (!player) return;
+
+        if (active) {
+            if (!cancelMotionLogged) {
+                LogMotion("attack-to-block motion", a_translation, true, player->IsBlocking());
+                cancelMotionLogged = true;
+            }
+            return;
+        }
+
+        const bool blocking = player->IsBlocking();
+        if (!blocking) {
+            moveToBlockMotionLogged = false;
+            return;
+        }
+        if (!moveToBlockMotionLogged && HasHorizontalMotion(a_translation)) {
+            LogMotion("move-to-block diagnostic", a_translation, false, true);
+            moveToBlockMotionLogged = true;
+        }
+    }
+
+    RE::BSEventNotifyControl ProcessEvent(const RE::BSAnimationGraphEvent* a_event,
+        RE::BSTEventSource<RE::BSAnimationGraphEvent>*) override
+    {
+        if (!a_event) return RE::BSEventNotifyControl::kContinue;
+
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        if (!player) return RE::BSEventNotifyControl::kContinue;
+
+        const std::string_view tag{a_event->tag.c_str()};
+        if (!RelevantTag(tag)) return RE::BSEventNotifyControl::kContinue;
+
+        bool attacking = false;
+        player->GetGraphVariableBool("IsAttacking", attacking);
+        const bool blocking = player->IsBlocking();
+        if (tag == "blockStartOut" && attacking) {
+            active = true;
+            cancelMotionLogged = false;
+        } else if (tag == "attackStop") {
+            active = false;
+            cancelMotionLogged = false;
+        }
+
+        spdlog::info("attack-to-block event tag={} attacking={} blocking={} active={} suppression={}",
+            tag, attacking, blocking, active, active);
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+private:
+    static bool RelevantTag(std::string_view a_tag)
+    {
+        return a_tag.find("attack") != std::string_view::npos ||
+               a_tag.find("block") != std::string_view::npos;
+    }
+
+    static bool HasHorizontalMotion(const RE::NiPoint3* a_translation)
+    {
+        return a_translation && (a_translation->x != 0.0F || a_translation->y != 0.0F);
+    }
+
+    static void LogMotion(const char* a_label, const RE::NiPoint3* a_translation,
+        bool a_suppression, bool a_blocking)
+    {
+        const float x = a_translation ? a_translation->x : 0.0F;
+        const float y = a_translation ? a_translation->y : 0.0F;
+        spdlog::info("{} translation_x={:.5f} translation_y={:.5f} blocking={} suppression={}",
+            a_label, x, y, a_blocking, a_suppression);
+    }
+
+    bool registered{false};
+    bool active{false};
+    bool cancelMotionLogged{false};
+    bool moveToBlockMotionLogged{false};
+};
+
+class AnimationMotionHook final
+{
+public:
+    static void Install()
+    {
+        if (installed) return;
+
+        // Skyrim 1.6.1170: MovementTweenerAgentAnimationDriven motion update
+        // calls ProcessMotionData at this relocation/variant-offset call site.
+        REL::Relocation<std::uintptr_t> target{
+            RELOCATION_ID(41160, 42246), REL::VariantOffset(0x111, 0xFF, 0x111)};
+        original = SKSE::GetTrampoline().write_call<5>(target.address(), ProcessMotionData);
+        installed = true;
+        AttackToBlockCancel::Get().Register();
+        spdlog::info("animation motion hook active: ProcessMotionData call-site");
+    }
+
+    static void RegisterEvents() { AttackToBlockCancel::Get().Register(); }
+    static void Reset(const char* a_reason) { AttackToBlockCancel::Get().Reset(a_reason); }
+
+private:
+    static bool ProcessMotionData(RE::TESObjectREFR* a_reference, float a_deltaTime,
+        RE::NiPoint3* a_translation, RE::NiPoint3* a_rotation, bool* a_result)
+    {
+        const bool result = original(a_reference, a_deltaTime, a_translation, a_rotation, a_result);
+        if (!a_reference || !a_reference->IsPlayerRef()) return result;
+
+        auto& cancel = AttackToBlockCancel::Get();
+        cancel.ObserveMotion(a_translation);
+        if (a_translation && cancel.Active()) {
+            a_translation->x = 0.0F;
+            a_translation->y = 0.0F;
+        }
+        return result;
+    }
+
+    inline static REL::Relocation<decltype(ProcessMotionData)> original;
+    inline static bool installed{false};
+};
+
 class Controller final : public RE::BSTEventSink<RE::InputEvent*>,
                          public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 {
@@ -152,6 +301,7 @@ public:
         ui->AddEventSink<RE::MenuOpenCloseEvent>(this);
         runtimeStarted = true;
         MovementHook::Install();
+        AnimationMotionHook::Install();
         InstallFocusSubclass();
         spdlog::info("Menu sink active; focus reset uses WM_ACTIVATEAPP window subclass");
     }
@@ -159,6 +309,7 @@ public:
     void BeginLoad()
     {
         Reset("pre-load"); // clear the old graph before it is replaced
+        AnimationMotionHook::Reset("pre-load");
         loading = true;
         blocked = true;
     }
@@ -169,6 +320,8 @@ public:
         graphStatus = -1;
         nextGraphCheck = {};
         Reset("new/post-load");
+        AnimationMotionHook::Reset("new/post-load");
+        AnimationMotionHook::RegisterEvents();
         blocked = true;
         if (runtimeStarted) InstallFocusSubclass();
     }
@@ -424,6 +577,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
             return false;
         }
         SKSE::Init(skse);
+        SKSE::AllocTrampoline(14);
         if (!SKSE::GetTaskInterface() || !SKSE::GetMessagingInterface()->RegisterListener(OnMessage)) return false;
         spdlog::info("DawnwalkerCombat 0.1.0 loaded for Skyrim 1.6.1170; raw axes are engine-normalized before DW deadzone, not physical ADC values");
         return true;

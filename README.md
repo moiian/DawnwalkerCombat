@@ -51,6 +51,18 @@ new graph variable through `SetGraphVariableInt`.
   touch attack, bash, camera, turning, root motion, stagger, or knockback.
   The Step 1 raw input sink therefore continues to publish `DW_InputDirection`
   for OAR while ordinary blocking locomotion is suppressed.
+- Step 2A additionally intercepts the 1.6.1170
+  `MovementTweenerAgentAnimationDriven` call to `ProcessMotionData` through
+  `RELOCATION_ID(41160, 42246)` and its runtime variant offset. It calls the
+  original first. Only a narrow graph-event lifecycle can suppress motion:
+  `blockStartOut` while `IsAttacking` sets `AttackToBlockCancelActive`, and
+  `attackStop` clears it. While active, only animation translation X/Y are set
+  to zero; Z translation and rotation are unchanged. Blocking alone never
+  enables this suppression.
+- The same hook emits one bounded Move-to-Block diagnostic per blocking period
+  when non-zero horizontal animation translation is observed. It is diagnostic
+  only: it does not change velocity, controller state, or ordinary blocking
+  motion outside the attack-to-block lifecycle.
 
 ## Runtime requirements
 
