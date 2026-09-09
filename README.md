@@ -33,10 +33,12 @@ new graph variable through `SetGraphVariableInt`.
   state. Held keyboard repeat events do not restore a key after reset; release
   and press again. A new stick event after returning to gameplay can select its
   current direction. HUD overlays that do not consume input do not block it.
-- Input sinks register at SKSE `kInputLoaded`. A small background watcher checks
-  foreground focus every 100 ms and queues exactly one game-thread reset on a
-  focus-loss transition. It never reads game objects. Direction writes queue only
-  when the output changes; they are not driven by a 60 Hz task loop.
+- Input sinks register at SKSE `kInputLoaded`. At `kDataLoaded`, a task on the
+  Skyrim window thread installs a `WM_ACTIVATEAPP` subclass. On focus loss its
+  callback queues one game-thread reset; it never polls Windows input or touches
+  game objects directly. Installation verifies both process and window thread ID.
+  Direction writes queue only when the output changes; they are not driven by a
+  fixed task loop.
 - Logs are state-based: at most 10 input lines/sec during fast changes, at most
   2 raw-axis-only lines/sec, no static per-frame spam. Reset and graph availability
   transitions are separately logged. Logs are not a full event trace.
@@ -102,9 +104,11 @@ prepared OAR config overlay only after verifying the graph variable in game.
    (0 for neutral). Preserve all non-direction conditions, priority and blend
    settings. Stances stay interruptible; BFCO attacks stay non-interruptible.
 
-The first game run, controller mapping, focus/menu behavior and actual OAR
+The first game run, controller mapping, window-focus reset, and actual OAR
 transition timing must be validated on the user's mod stack. Cloud CI cannot
-simulate Skyrim. Roll back by disabling the input mod and the optional OAR overlay.
+simulate Skyrim. Focus loss uses a game-window `WM_ACTIVATEAPP` subclass; the
+callback queues a game-thread reset and never polls Windows input. Roll back by
+disabling the input mod and the optional OAR overlay.
 
 ## Source layout / license
 

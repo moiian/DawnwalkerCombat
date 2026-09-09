@@ -1,23 +1,34 @@
 #include "Direction.h"
+#include <RE/M/Main.h>
+#include <RE/R/Renderer.h>
 #include <RE/T/ThumbstickEvent.h>
 #include <Windows.h>
+#include <CommCtrl.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <atomic>
 #include <chrono>
-#include <thread>
 
 using namespace std::chrono_literals;
 namespace
 {
 constexpr REL::Version TargetRuntime{1, 6, 1170, 0};
 constexpr const char* Variable = "DW_InputDirection";
+constexpr UINT_PTR FocusSubclassId = 0x44574301; // "DWC" + implementation revision
 using Clock = std::chrono::steady_clock;
 
-bool HasFocus()
+HWND FindSkyrimWindow()
 {
-    DWORD process = 0;
-    const auto foreground = GetForegroundWindow();
-    return foreground && GetWindowThreadProcessId(foreground, &process) && process == GetCurrentProcessId();
+    if (const auto main = RE::Main::GetSingleton(); main && main->wnd) {
+        const auto window = reinterpret_cast<HWND>(main->wnd);
+        if (IsWindow(window)) return window;
+    }
+    if (const auto renderer = RE::BSGraphics::Renderer::GetSingleton(); renderer) {
+        const auto window = reinterpret_cast<HWND>(renderer->data.renderWindows[0].hWnd);
+        if (IsWindow(window)) return window;
+    }
+    // Only a last-resort fallback. The process and window-thread checks below
+    // reject a title match belonging to a different process or thread.
+    return FindWindowW(nullptr, L"Skyrim Special Edition");
 }
 
 bool MenuBlocksInput()
@@ -58,8 +69,6 @@ class Controller final : public RE::BSTEventSink<RE::InputEvent*>,
                          public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 {
 public:
-    // Process lifetime: SKSE does not dynamically unload plugins. Avoid a joining
-    // thread destructor under the Windows loader lock at process exit.
     static Controller& Get() { static auto instance = new Controller; return *instance; }
 
     void StartInput()
@@ -87,22 +96,8 @@ public:
         }
         ui->AddEventSink<RE::MenuOpenCloseEvent>(this);
         runtimeStarted = true;
-        // The worker only detects foreground transitions. Every RE object and
-        // animation-graph write remains in the game-thread task it submits.
-        std::thread([this, tasks, focused = HasFocus()]() mutable {
-            while (true) {
-                const bool nowFocused = HasFocus();
-                if (focused && !nowFocused && !focusResetQueued.exchange(true)) {
-                    tasks->AddTask([this] {
-                        focusResetQueued.store(false);
-                        Reset("focus-lost");
-                    });
-                }
-                focused = nowFocused;
-                std::this_thread::sleep_for(100ms);
-            }
-        }).detach();
-        spdlog::info("Menu sink and focus-edge watcher active");
+        InstallFocusSubclass();
+        spdlog::info("Menu sink active; focus reset uses WM_ACTIVATEAPP window subclass");
     }
 
     void BeginLoad()
@@ -119,6 +114,7 @@ public:
         nextGraphCheck = {};
         Reset("new/post-load");
         blocked = true;
+        if (runtimeStarted) InstallFocusSubclass();
     }
 
     RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* events,
@@ -171,7 +167,7 @@ public:
 private:
     [[nodiscard]] bool InputBlocked()
     {
-        const bool nowBlocked = loading || !HasFocus() || MenuBlocksInput();
+        const bool nowBlocked = loading || MenuBlocksInput();
         if (nowBlocked && !blocked) Reset("menu/loading");
         blocked = nowBlocked;
         return nowBlocked;
@@ -184,6 +180,93 @@ private:
             publishQueued.store(false);
             Publish();
         });
+    }
+
+    static LRESULT CALLBACK FocusSubclassProc(HWND window, UINT message, WPARAM wParam,
+        LPARAM, UINT_PTR, DWORD_PTR reference)
+    {
+        if (message == WM_ACTIVATEAPP && wParam == FALSE) {
+            // The window callback deliberately does not touch RE/game objects.
+            // It only queues a game-thread reset of the local state and graph value.
+            if (const auto controller = reinterpret_cast<Controller*>(reference)) {
+                controller->QueueFocusReset();
+            }
+        }
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
+    void InstallFocusSubclass()
+    {
+        if (focusSubclassInstalled || focusInstallQueued.exchange(true)) return;
+        const auto tasks = SKSE::GetTaskInterface();
+        if (!tasks) {
+            focusInstallQueued.store(false);
+            WarnFocusHook("task interface unavailable");
+            return;
+        }
+        tasks->AddTask([this] {
+            focusInstallQueued.store(false);
+            if (focusSubclassInstalled) return;
+
+            const auto window = FindSkyrimWindow();
+            if (!window) {
+                WarnFocusHook("Skyrim window unavailable");
+                return;
+            }
+            DWORD process = 0;
+            const auto windowThread = GetWindowThreadProcessId(window, &process);
+            if (process != GetCurrentProcessId()) {
+                WarnFocusHook("window belongs to another process");
+                return;
+            }
+            // SetWindowSubclass must be called from the window-owning thread.
+            if (windowThread != GetCurrentThreadId()) {
+                WarnFocusHook("game task is not on the Skyrim window thread");
+                return;
+            }
+            if (!SetWindowSubclass(window, FocusSubclassProc, FocusSubclassId,
+                    reinterpret_cast<DWORD_PTR>(this))) {
+                WarnFocusHook("SetWindowSubclass failed");
+                return;
+            }
+            focusWindow = window;
+            focusSubclassInstalled = true;
+            spdlog::info("focus subclass active: WM_ACTIVATEAPP clears input state");
+        });
+    }
+
+    void RemoveFocusSubclass()
+    {
+        if (!focusSubclassInstalled) return;
+        if (focusWindow && IsWindow(focusWindow) &&
+            GetWindowThreadProcessId(focusWindow, nullptr) == GetCurrentThreadId()) {
+            if (!RemoveWindowSubclass(focusWindow, FocusSubclassProc, FocusSubclassId)) {
+                WarnFocusHook("RemoveWindowSubclass failed");
+            }
+        }
+        focusWindow = nullptr;
+        focusSubclassInstalled = false;
+    }
+
+    void QueueFocusReset()
+    {
+        if (focusResetQueued.exchange(true)) return;
+        const auto tasks = SKSE::GetTaskInterface();
+        if (!tasks) {
+            focusResetQueued.store(false);
+            return;
+        }
+        tasks->AddTask([this] {
+            focusResetQueued.store(false);
+            Reset("focus-lost");
+        });
+    }
+
+    void WarnFocusHook(const char* reason)
+    {
+        if (!focusWarningLogged.exchange(true)) {
+            spdlog::warn("focus subclass inactive: {}; input plugin continues without focus reset", reason);
+        }
     }
 
     void Reset(const char* reason)
@@ -237,8 +320,10 @@ private:
     }
 
     DW::InputState state;
-    std::atomic_bool publishQueued{false}, focusResetQueued{false};
-    bool inputSinkRegistered{false}, runtimeStarted{false};
+    std::atomic_bool publishQueued{false}, focusResetQueued{false}, focusInstallQueued{false},
+        focusWarningLogged{false};
+    HWND focusWindow{nullptr};
+    bool inputSinkRegistered{false}, runtimeStarted{false}, focusSubclassInstalled{false};
     bool loading{true}, blocked{true};
     int graphStatus{-1};
     Clock::time_point nextGraphCheck{}, nextLog{}, nextAxisLog{};

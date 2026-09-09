@@ -28,7 +28,7 @@ FetchContent_Declare(CommonLibSSE
 FetchContent_MakeAvailable(CommonLibSSE)
 
 add_library(DawnwalkerCombat SHARED src/Plugin.cpp src/Direction.h)
-target_link_libraries(DawnwalkerCombat PRIVATE CommonLibSSE::CommonLibSSE user32)
+target_link_libraries(DawnwalkerCombat PRIVATE CommonLibSSE::CommonLibSSE user32 comctl32)
 target_compile_definitions(DawnwalkerCombat PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(DawnwalkerCombat PRIVATE /W4 /permissive- /utf-8 /EHsc)
 target_precompile_headers(DawnwalkerCombat PRIVATE <RE/Skyrim.h> <SKSE/SKSE.h>)
