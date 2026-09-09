@@ -9,9 +9,6 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <atomic>
 #include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <string>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -21,29 +18,6 @@ constexpr REL::Version TargetRuntime{1, 6, 1170, 0};
 constexpr const char* Variable = "DW_InputDirection";
 constexpr UINT_PTR FocusSubclassId = 0x44574301; // "DWC" + implementation revision
 using Clock = std::chrono::steady_clock;
-
-void WriteLogPathBreadcrumb(const std::filesystem::path* a_logDirectory) noexcept
-{
-    try {
-        wchar_t executable[MAX_PATH]{};
-        const auto length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
-        if (length == 0 || length >= MAX_PATH) return;
-
-        std::ofstream breadcrumb{std::filesystem::path{executable}.parent_path() /
-                "DawnwalkerCombat.log-path.txt",
-            std::ios::trunc};
-        if (!breadcrumb) return;
-        breadcrumb << "DawnwalkerCombat diagnostic breadcrumb\n";
-        if (a_logDirectory) {
-            breadcrumb << "Resolved SKSE log file: "
-                       << (*a_logDirectory / "DawnwalkerCombat.log").string() << '\n';
-        } else {
-            breadcrumb << "SKSE::log::log_directory() was unavailable before logger initialization.\n";
-        }
-    } catch (...) {
-        // Breadcrumb failure must never prevent SKSE plugin loading.
-    }
-}
 
 HWND FindSkyrimWindow()
 {
@@ -134,26 +108,12 @@ private:
         // this event, so this leaves DW_InputDirection, camera input, and all
         // non-movement button handling intact.
         const bool suppress = a_data && player && player->IsBlocking();
-        if (suppress) {
-            if (!suppressionActive) {
-                spdlog::info("movement suppression=active move_input_before=({:.4f},{:.4f}) "
-                             "prev_move_before=({:.4f},{:.4f})",
-                    a_data->moveInputVec.x, a_data->moveInputVec.y,
-                    a_data->prevMoveVec.x, a_data->prevMoveVec.y);
-            }
-            a_data->moveInputVec = {0.0F, 0.0F};
-            a_data->prevMoveVec = {0.0F, 0.0F};
-        }
-        if (suppress != suppressionActive) {
-            suppressionActive = suppress;
-            if (!suppress) spdlog::info("movement suppression=inactive");
-        }
+        if (suppress) a_data->moveInputVec = {0.0F, 0.0F};
     }
 
     inline static ThumbstickFn originalThumbstick;
     inline static ButtonFn originalButton;
     inline static bool installed{false};
-    inline static bool suppressionActive{false};
 };
 
 class AttackToBlockCancel final : public RE::BSTEventSink<RE::BSAnimationGraphEvent>
@@ -173,66 +133,17 @@ public:
         player->RemoveAnimationGraphEventSink(this);
         registered = player->AddAnimationGraphEventSink(this);
         if (registered) spdlog::info("attack-to-block animation event sink active");
-        else spdlog::warn("attack-to-block animation event sink registration failed");
+        else spdlog::debug("attack-to-block animation event sink registration deferred");
     }
 
     void Reset(const char* a_reason)
     {
         if (!active) return;
         active = false;
-        cancelMotionLogged = false;
         spdlog::info("attack-to-block cancel active=false reason={}", a_reason);
     }
 
     [[nodiscard]] bool Active() const { return active; }
-
-    void ObserveImmediateOverlap(const RE::NiPoint3* a_translation, RE::PlayerCharacter* a_player,
-        bool a_graphAttacking, bool a_bashing, bool a_overlap)
-    {
-        if (!a_overlap) {
-            immediateOverlapLogged = false;
-            return;
-        }
-        if (active || immediateOverlapLogged) return;
-
-        const float x = a_translation ? a_translation->x : 0.0F;
-        const float y = a_translation ? a_translation->y : 0.0F;
-        spdlog::info("immediate attack-block overlap suppression translation_x={:.5f} "
-                     "translation_y={:.5f} graph_attacking={} bashing={} blocking={} active=false",
-            x, y, a_graphAttacking, a_bashing, a_player && a_player->IsBlocking());
-        immediateOverlapLogged = true;
-    }
-
-    void ObserveMotion(const RE::NiPoint3* a_translation)
-    {
-        const auto player = RE::PlayerCharacter::GetSingleton();
-        if (!player) return;
-
-        if (motionSamplesPending != 0) {
-            LogMotion("attack-to-block event-window motion", a_translation, active, player,
-                lastTraceTag.c_str(), traceSequence);
-            --motionSamplesPending;
-        }
-
-        if (active) {
-            if (!cancelMotionLogged) {
-                LogMotion("attack-to-block motion", a_translation, true, player, "lifecycle", traceSequence);
-                cancelMotionLogged = true;
-            }
-            return;
-        }
-
-        const bool blocking = player->IsBlocking();
-        if (!blocking) {
-            moveToBlockMotionLogged = false;
-            return;
-        }
-        if (!moveToBlockMotionLogged && HasHorizontalMotion(a_translation)) {
-            LogMotion("blocking-entry motion diagnostic", a_translation, false, player,
-                "blocking-entry", 0);
-            moveToBlockMotionLogged = true;
-        }
-    }
 
     RE::BSEventNotifyControl ProcessEvent(const RE::BSAnimationGraphEvent* a_event,
         RE::BSTEventSource<RE::BSAnimationGraphEvent>*) override
@@ -243,70 +154,19 @@ public:
         if (!player) return RE::BSEventNotifyControl::kContinue;
 
         const std::string_view tag{a_event->tag.c_str()};
-        const bool attackStop = tag == "attackStop";
-        if (!traceActive && !attackStop && tag.find("attack") != std::string_view::npos) {
-            traceActive = true;
-            ++traceSequence;
-        }
-        if (!traceActive && !RelevantTag(tag)) return RE::BSEventNotifyControl::kContinue;
-
-        bool graphAttacking = false;
-        player->GetGraphVariableBool("IsAttacking", graphAttacking);
-        const bool blocking = player->IsBlocking();
-        if (tag == "blockStartOut" && graphAttacking) {
-            active = true;
-            cancelMotionLogged = false;
-        } else if (attackStop) {
+        if (tag == "blockStartOut") {
+            bool graphAttacking = false;
+            player->GetGraphVariableBool("IsAttacking", graphAttacking);
+            if (graphAttacking) active = true;
+        } else if (tag == "attackStop") {
             active = false;
-            cancelMotionLogged = false;
         }
-
-        lastTraceTag.assign(tag);
-        motionSamplesPending = 1;
-        spdlog::info("attack-to-block event sequence={} tag={} graph_attacking={} "
-                     "actor_attacking=unavailable blocking={} active={} suppression={}",
-            traceSequence, tag, graphAttacking, blocking, active, active);
-        if (attackStop) traceActive = false;
         return RE::BSEventNotifyControl::kContinue;
     }
 
 private:
-    static bool RelevantTag(std::string_view a_tag)
-    {
-        return a_tag.find("attack") != std::string_view::npos ||
-               a_tag.find("block") != std::string_view::npos ||
-               a_tag.find("cancel") != std::string_view::npos ||
-               a_tag.find("BFCO") != std::string_view::npos;
-    }
-
-    static bool HasHorizontalMotion(const RE::NiPoint3* a_translation)
-    {
-        return a_translation && (a_translation->x != 0.0F || a_translation->y != 0.0F);
-    }
-
-    void LogMotion(const char* a_label, const RE::NiPoint3* a_translation,
-        bool a_suppression, RE::PlayerCharacter* a_player, const char* a_afterTag,
-        std::uint32_t a_sequence)
-    {
-        const float x = a_translation ? a_translation->x : 0.0F;
-        const float y = a_translation ? a_translation->y : 0.0F;
-        bool graphAttacking = false;
-        if (a_player) a_player->GetGraphVariableBool("IsAttacking", graphAttacking);
-        const bool blocking = a_player && a_player->IsBlocking();
-        spdlog::info("{} sequence={} after_tag={} translation_x={:.5f} translation_y={:.5f} "
-                     "graph_attacking={} actor_attacking=unavailable blocking={} active={} suppression={}",
-            a_label, a_sequence, a_afterTag, x, y, graphAttacking, blocking, active, a_suppression);
-    }
-
     bool registered{false};
     bool active{false};
-    bool cancelMotionLogged{false};
-    bool immediateOverlapLogged{false};
-    bool moveToBlockMotionLogged{false};
-    bool traceActive{false};
-    std::uint32_t traceSequence{0};
-    std::uint8_t motionSamplesPending{0};
-    std::string lastTraceTag;
 };
 
 class AnimationMotionHook final
@@ -345,8 +205,6 @@ private:
             player->GetGraphVariableBool("IsBashing", bashing);
         }
         const bool immediateOverlap = player && player->IsBlocking() && graphAttacking && !bashing;
-        cancel.ObserveMotion(a_translation);
-        cancel.ObserveImmediateOverlap(a_translation, player, graphAttacking, bashing, immediateOverlap);
         if (a_translation && (cancel.Active() || immediateOverlap)) {
             a_translation->x = 0.0F;
             a_translation->y = 0.0F;
@@ -653,7 +511,6 @@ SKSEPluginInfo(
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     const auto directory = SKSE::log::log_directory();
-    WriteLogPathBreadcrumb(directory ? &*directory : nullptr);
     if (!directory) return false;
     try {
         auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
