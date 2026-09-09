@@ -183,7 +183,7 @@ private:
     }
 
     static LRESULT CALLBACK FocusSubclassProc(HWND window, UINT message, WPARAM wParam,
-        LPARAM, UINT_PTR, DWORD_PTR reference)
+        LPARAM lParam, UINT_PTR, DWORD_PTR reference)
     {
         if (message == WM_ACTIVATEAPP && wParam == FALSE) {
             // The window callback deliberately does not touch RE/game objects.

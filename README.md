@@ -64,7 +64,7 @@ the mod. Download the **DawnwalkerCombat-0.1.0-MO2** artifact from the successfu
 run, extract GitHub's outer artifact ZIP, then install the inner
 `DawnwalkerCombat-0.1.0-MO2.zip` in MO2.
 
-The CMake preset consumes CommonLibSSE-NG tag v3.7.0 and vcpkg tag 2023.10.19,
+The CMake preset requires CMake 3.28+, consumes CommonLibSSE-NG tag v3.7.0 and vcpkg tag 2023.10.19,
 with a static MSVC runtime. The repository contains no game files or credentials.
 Artifacts expire after 30 days: rerun the workflow for a fresh copy. A successful
 build proves compilation and portable tests, not in-game compatibility.

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.28)
 project(DawnwalkerCombat VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -24,7 +24,8 @@ include(FetchContent)
 FetchContent_Declare(CommonLibSSE
   GIT_REPOSITORY https://github.com/CharmedBaryon/CommonLibSSE-NG.git
   GIT_TAG v3.7.0
-  GIT_SHALLOW TRUE)
+  GIT_SHALLOW TRUE
+  EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(CommonLibSSE)
 
 add_library(DawnwalkerCombat SHARED src/Plugin.cpp src/Direction.h)
