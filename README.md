@@ -63,6 +63,15 @@ new graph variable through `SetGraphVariableInt`.
   when non-zero horizontal animation translation is observed. It is diagnostic
   only: it does not change velocity, controller state, or ordinary blocking
   motion outside the attack-to-block lifecycle.
+- For an early attack-to-block diagnosis, the graph sink assigns a sequence to
+  each attack window and logs all graph tags through `attackStop`, plus one
+  following motion sample per captured tag. Each event/motion line records the
+  graph `IsAttacking`, `IsBlocking`, active/suppression state and translation
+  X/Y. `Actor::IsAttacking()` is not exposed by this CommonLibSSE-NG target, so
+  the log explicitly marks that direct field unavailable rather than inferring it.
+- On plugin load, `DawnwalkerCombat.log-path.txt` is written beside
+  `SkyrimSE.exe`. It gives the resolved SKSE log file path, or reports that the
+  SKSE log directory was unavailable before initialization.
 
 ## Runtime requirements
 

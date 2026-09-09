@@ -9,6 +9,9 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -18,6 +21,29 @@ constexpr REL::Version TargetRuntime{1, 6, 1170, 0};
 constexpr const char* Variable = "DW_InputDirection";
 constexpr UINT_PTR FocusSubclassId = 0x44574301; // "DWC" + implementation revision
 using Clock = std::chrono::steady_clock;
+
+void WriteLogPathBreadcrumb(const std::filesystem::path* a_logDirectory) noexcept
+{
+    try {
+        wchar_t executable[MAX_PATH]{};
+        const auto length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) return;
+
+        std::ofstream breadcrumb{std::filesystem::path{executable}.parent_path() /
+                "DawnwalkerCombat.log-path.txt",
+            std::ios::trunc};
+        if (!breadcrumb) return;
+        breadcrumb << "DawnwalkerCombat diagnostic breadcrumb\n";
+        if (a_logDirectory) {
+            breadcrumb << "Resolved SKSE log file: "
+                       << (*a_logDirectory / "DawnwalkerCombat.log").string() << '\n';
+        } else {
+            breadcrumb << "SKSE::log::log_directory() was unavailable before logger initialization.\n";
+        }
+    } catch (...) {
+        // Breadcrumb failure must never prevent SKSE plugin loading.
+    }
+}
 
 HWND FindSkyrimWindow()
 {
@@ -156,9 +182,15 @@ public:
         const auto player = RE::PlayerCharacter::GetSingleton();
         if (!player) return;
 
+        if (motionSamplesPending != 0) {
+            LogMotion("attack-to-block event-window motion", a_translation, active, player,
+                lastTraceTag.c_str(), traceSequence);
+            --motionSamplesPending;
+        }
+
         if (active) {
             if (!cancelMotionLogged) {
-                LogMotion("attack-to-block motion", a_translation, true, player->IsBlocking());
+                LogMotion("attack-to-block motion", a_translation, true, player, "lifecycle", traceSequence);
                 cancelMotionLogged = true;
             }
             return;
@@ -170,7 +202,7 @@ public:
             return;
         }
         if (!moveToBlockMotionLogged && HasHorizontalMotion(a_translation)) {
-            LogMotion("move-to-block diagnostic", a_translation, false, true);
+            LogMotion("move-to-block diagnostic", a_translation, false, player, "move-to-block", 0);
             moveToBlockMotionLogged = true;
         }
     }
@@ -184,21 +216,30 @@ public:
         if (!player) return RE::BSEventNotifyControl::kContinue;
 
         const std::string_view tag{a_event->tag.c_str()};
-        if (!RelevantTag(tag)) return RE::BSEventNotifyControl::kContinue;
+        const bool attackStop = tag == "attackStop";
+        if (!traceActive && !attackStop && tag.find("attack") != std::string_view::npos) {
+            traceActive = true;
+            ++traceSequence;
+        }
+        if (!traceActive && !RelevantTag(tag)) return RE::BSEventNotifyControl::kContinue;
 
-        bool attacking = false;
-        player->GetGraphVariableBool("IsAttacking", attacking);
+        bool graphAttacking = false;
+        player->GetGraphVariableBool("IsAttacking", graphAttacking);
         const bool blocking = player->IsBlocking();
-        if (tag == "blockStartOut" && attacking) {
+        if (tag == "blockStartOut" && graphAttacking) {
             active = true;
             cancelMotionLogged = false;
-        } else if (tag == "attackStop") {
+        } else if (attackStop) {
             active = false;
             cancelMotionLogged = false;
         }
 
-        spdlog::info("attack-to-block event tag={} attacking={} blocking={} active={} suppression={}",
-            tag, attacking, blocking, active, active);
+        lastTraceTag.assign(tag);
+        motionSamplesPending = 1;
+        spdlog::info("attack-to-block event sequence={} tag={} graph_attacking={} "
+                     "actor_attacking=unavailable blocking={} active={} suppression={}",
+            traceSequence, tag, graphAttacking, blocking, active, active);
+        if (attackStop) traceActive = false;
         return RE::BSEventNotifyControl::kContinue;
     }
 
@@ -206,7 +247,9 @@ private:
     static bool RelevantTag(std::string_view a_tag)
     {
         return a_tag.find("attack") != std::string_view::npos ||
-               a_tag.find("block") != std::string_view::npos;
+               a_tag.find("block") != std::string_view::npos ||
+               a_tag.find("cancel") != std::string_view::npos ||
+               a_tag.find("BFCO") != std::string_view::npos;
     }
 
     static bool HasHorizontalMotion(const RE::NiPoint3* a_translation)
@@ -214,19 +257,28 @@ private:
         return a_translation && (a_translation->x != 0.0F || a_translation->y != 0.0F);
     }
 
-    static void LogMotion(const char* a_label, const RE::NiPoint3* a_translation,
-        bool a_suppression, bool a_blocking)
+    void LogMotion(const char* a_label, const RE::NiPoint3* a_translation,
+        bool a_suppression, RE::PlayerCharacter* a_player, const char* a_afterTag,
+        std::uint32_t a_sequence)
     {
         const float x = a_translation ? a_translation->x : 0.0F;
         const float y = a_translation ? a_translation->y : 0.0F;
-        spdlog::info("{} translation_x={:.5f} translation_y={:.5f} blocking={} suppression={}",
-            a_label, x, y, a_blocking, a_suppression);
+        bool graphAttacking = false;
+        if (a_player) a_player->GetGraphVariableBool("IsAttacking", graphAttacking);
+        const bool blocking = a_player && a_player->IsBlocking();
+        spdlog::info("{} sequence={} after_tag={} translation_x={:.5f} translation_y={:.5f} "
+                     "graph_attacking={} actor_attacking=unavailable blocking={} active={} suppression={}",
+            a_label, a_sequence, a_afterTag, x, y, graphAttacking, blocking, active, a_suppression);
     }
 
     bool registered{false};
     bool active{false};
     bool cancelMotionLogged{false};
     bool moveToBlockMotionLogged{false};
+    bool traceActive{false};
+    std::uint32_t traceSequence{0};
+    std::uint8_t motionSamplesPending{0};
+    std::string lastTraceTag;
 };
 
 class AnimationMotionHook final
@@ -564,6 +616,7 @@ SKSEPluginInfo(
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     const auto directory = SKSE::log::log_directory();
+    WriteLogPathBreadcrumb(directory ? &*directory : nullptr);
     if (!directory) return false;
     try {
         auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
