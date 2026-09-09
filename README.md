@@ -54,12 +54,19 @@ new graph variable through `SetGraphVariableInt`.
 - Step 2A additionally intercepts the 1.6.1170
   `MovementTweenerAgentAnimationDriven` call to `ProcessMotionData` through
   `RELOCATION_ID(41160, 42246)` and its runtime variant offset. It calls the
-  original first. Only a narrow graph-event lifecycle can suppress motion:
+  original first. Its standard graph-event lifecycle is narrow:
   `blockStartOut` while `IsAttacking` sets `AttackToBlockCancelActive`, and
   `attackStop` clears it. While active, only animation translation X/Y are set
   to zero; Z translation and rotation are unchanged. Blocking alone never
   enables this suppression.
-- The same hook emits one bounded Move-to-Block diagnostic per blocking period
+- For BFCO's immediate-block overlap, the same motion call additionally
+  suppresses X/Y only when `IsBlocking && IsAttacking && !IsBashing` is true.
+  This is a one-call gate, not a latch or timer; the standard graph-event
+  lifecycle remains in place for deferred attack-to-block transitions.
+- The blocking locomotion suppression hook clears only `moveInputVec` and
+  `prevMoveVec` after vanilla input handling. It leaves look input, auto-move,
+  running and every other `PlayerControlsData` field untouched.
+- The same hook emits one bounded blocking-entry motion diagnostic per blocking period
   when non-zero horizontal animation translation is observed. It is diagnostic
   only: it does not change velocity, controller state, or ordinary blocking
   motion outside the attack-to-block lifecycle.

@@ -134,10 +134,19 @@ private:
         // this event, so this leaves DW_InputDirection, camera input, and all
         // non-movement button handling intact.
         const bool suppress = a_data && player && player->IsBlocking();
-        if (suppress) a_data->moveInputVec = {0.0F, 0.0F};
+        if (suppress) {
+            if (!suppressionActive) {
+                spdlog::info("movement suppression=active move_input_before=({:.4f},{:.4f}) "
+                             "prev_move_before=({:.4f},{:.4f})",
+                    a_data->moveInputVec.x, a_data->moveInputVec.y,
+                    a_data->prevMoveVec.x, a_data->prevMoveVec.y);
+            }
+            a_data->moveInputVec = {0.0F, 0.0F};
+            a_data->prevMoveVec = {0.0F, 0.0F};
+        }
         if (suppress != suppressionActive) {
             suppressionActive = suppress;
-            spdlog::info("movement suppression={}", suppress ? "active" : "inactive");
+            if (!suppress) spdlog::info("movement suppression=inactive");
         }
     }
 
@@ -177,6 +186,23 @@ public:
 
     [[nodiscard]] bool Active() const { return active; }
 
+    void ObserveImmediateOverlap(const RE::NiPoint3* a_translation, RE::PlayerCharacter* a_player,
+        bool a_graphAttacking, bool a_bashing, bool a_overlap)
+    {
+        if (!a_overlap) {
+            immediateOverlapLogged = false;
+            return;
+        }
+        if (active || immediateOverlapLogged) return;
+
+        const float x = a_translation ? a_translation->x : 0.0F;
+        const float y = a_translation ? a_translation->y : 0.0F;
+        spdlog::info("immediate attack-block overlap suppression translation_x={:.5f} "
+                     "translation_y={:.5f} graph_attacking={} bashing={} blocking={} active=false",
+            x, y, a_graphAttacking, a_bashing, a_player && a_player->IsBlocking());
+        immediateOverlapLogged = true;
+    }
+
     void ObserveMotion(const RE::NiPoint3* a_translation)
     {
         const auto player = RE::PlayerCharacter::GetSingleton();
@@ -202,7 +228,8 @@ public:
             return;
         }
         if (!moveToBlockMotionLogged && HasHorizontalMotion(a_translation)) {
-            LogMotion("move-to-block diagnostic", a_translation, false, player, "move-to-block", 0);
+            LogMotion("blocking-entry motion diagnostic", a_translation, false, player,
+                "blocking-entry", 0);
             moveToBlockMotionLogged = true;
         }
     }
@@ -274,6 +301,7 @@ private:
     bool registered{false};
     bool active{false};
     bool cancelMotionLogged{false};
+    bool immediateOverlapLogged{false};
     bool moveToBlockMotionLogged{false};
     bool traceActive{false};
     std::uint32_t traceSequence{0};
@@ -309,8 +337,17 @@ private:
         if (!a_reference || !a_reference->IsPlayerRef()) return result;
 
         auto& cancel = AttackToBlockCancel::Get();
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        bool graphAttacking = false;
+        bool bashing = false;
+        if (player) {
+            player->GetGraphVariableBool("IsAttacking", graphAttacking);
+            player->GetGraphVariableBool("IsBashing", bashing);
+        }
+        const bool immediateOverlap = player && player->IsBlocking() && graphAttacking && !bashing;
         cancel.ObserveMotion(a_translation);
-        if (a_translation && cancel.Active()) {
+        cancel.ObserveImmediateOverlap(a_translation, player, graphAttacking, bashing, immediateOverlap);
+        if (a_translation && (cancel.Active() || immediateOverlap)) {
             a_translation->x = 0.0F;
             a_translation->y = 0.0F;
         }
