@@ -88,7 +88,9 @@ private:
 class AttackDirectionState
 {
 public:
-    static constexpr auto kAttackDirectionWindow = std::chrono::milliseconds{200};
+    static constexpr auto kDefaultAttackDirectionWindow = std::chrono::milliseconds{200};
+
+    void SetUpdateWindow(std::chrono::milliseconds a_window) { updateWindow = a_window; }
 
     void Begin(Direction a_currentInput, std::chrono::steady_clock::time_point a_now)
     {
@@ -100,7 +102,7 @@ public:
     bool Update(Direction a_newInput, std::chrono::steady_clock::time_point a_now)
     {
         if (!active || a_newInput == Direction::None) return false;
-        if (a_now - startedAt > kAttackDirectionWindow || direction == a_newInput) return false;
+        if (updateWindow.count() == 0 || a_now - startedAt > updateWindow || direction == a_newInput) return false;
         direction = a_newInput;
         return true;
     }
@@ -118,5 +120,6 @@ private:
     bool active{false};
     std::chrono::steady_clock::time_point startedAt{};
     Direction direction{Direction::None};
+    std::chrono::milliseconds updateWindow{kDefaultAttackDirectionWindow};
 };
 }

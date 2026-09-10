@@ -8,7 +8,11 @@
 #include <CommCtrl.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <cctype>
+#include <fstream>
+#include <string>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -19,6 +23,45 @@ constexpr const char* InputVariable = "DW_InputDirection";
 constexpr const char* AttackVariable = "DW_AttackDirection";
 constexpr UINT_PTR FocusSubclassId = 0x44574301; // "DWC" + implementation revision
 using Clock = std::chrono::steady_clock;
+constexpr std::string_view AttackDirectionIniPath = "Data/SKSE/Plugins/DawnwalkerCombat.ini";
+
+std::string_view Trim(std::string_view value)
+{
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.remove_prefix(1);
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.remove_suffix(1);
+    return value;
+}
+
+std::chrono::milliseconds LoadAttackDirectionWindow()
+{
+    std::ifstream file{AttackDirectionIniPath.data()};
+    if (!file) return DW::AttackDirectionState::kDefaultAttackDirectionWindow;
+
+    bool attackDirectionSection = false;
+    std::string line;
+    while (std::getline(file, line)) {
+        auto value = Trim(line);
+        if (value.empty() || value.front() == ';' || value.front() == '#') continue;
+        if (value.front() == '[' && value.back() == ']') {
+            attackDirectionSection = Trim(value.substr(1, value.size() - 2)) == "AttackDirection";
+            continue;
+        }
+        if (!attackDirectionSection) continue;
+        const auto separator = value.find('=');
+        if (separator == std::string_view::npos || Trim(value.substr(0, separator)) != "UpdateWindowMs") continue;
+
+        const auto configured = Trim(value.substr(separator + 1));
+        std::uint32_t milliseconds = 0;
+        const auto [end, error] = std::from_chars(configured.data(), configured.data() + configured.size(), milliseconds);
+        if (error == std::errc{} && end == configured.data() + configured.size()) {
+            return std::chrono::milliseconds{milliseconds};
+        }
+        spdlog::warn("invalid {} UpdateWindowMs; using default {}ms", AttackDirectionIniPath,
+            DW::AttackDirectionState::kDefaultAttackDirectionWindow.count());
+        return DW::AttackDirectionState::kDefaultAttackDirectionWindow;
+    }
+    return DW::AttackDirectionState::kDefaultAttackDirectionWindow;
+}
 
 HWND FindSkyrimWindow()
 {
@@ -238,6 +281,11 @@ public:
             DW::InputState::Deadzone, DW::InputState::AxisRatio);
     }
 
+    void SetAttackDirectionWindow(std::chrono::milliseconds window)
+    {
+        attackDirection.SetUpdateWindow(window);
+    }
+
     void StartRuntime()
     {
         if (runtimeStarted) return;
@@ -306,6 +354,7 @@ public:
         }
         const auto current = state.Value();
         if (current != before) {
+            ReconcileAttackDirectionLifecycle();
             UpdateAttackDirection(current, Clock::now());
             QueuePublish();
         }
@@ -321,9 +370,11 @@ public:
             if (menu && menu->menuFlags.any(RE::UI_MENU_FLAGS::kUsesMenuContext,
                     RE::UI_MENU_FLAGS::kUsesCursor, RE::UI_MENU_FLAGS::kPausesGame,
                     RE::UI_MENU_FLAGS::kModal, RE::UI_MENU_FLAGS::kInventoryItemMenu)) {
-                Reset("menu-open");
+                Reset("menu-open", false);
                 blocked = true;
             }
+        } else if (event && !event->opening) {
+            ReconcileAttackDirectionLifecycle();
         }
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -334,10 +385,11 @@ public:
         if (!event) return RE::BSEventNotifyControl::kContinue;
 
         const std::string_view tag{event->tag.c_str()};
+        ReconcileAttackDirectionLifecycle();
         if (tag == "BFCO_PlayerAttackStart") {
-            BeginAttackSegment(tag);
+            BeginAttackSegment();
         } else if (tag == "attackStop" || tag == "EndAnimatedCamera") {
-            EndAttackSegment(tag);
+            EndAttackSegment();
         }
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -346,7 +398,7 @@ private:
     [[nodiscard]] bool InputBlocked()
     {
         const bool nowBlocked = loading || MenuBlocksInput();
-        if (nowBlocked && !blocked) Reset("menu/loading");
+        if (nowBlocked && !blocked) Reset("menu/loading", loading);
         blocked = nowBlocked;
         return nowBlocked;
     }
@@ -363,29 +415,34 @@ private:
         }
     }
 
-    void BeginAttackSegment(std::string_view event)
+    void BeginAttackSegment()
     {
         const auto input = state.Value();
         attackDirection.Begin(input, Clock::now());
-        ++attackSegmentSerial;
-        spdlog::info("segment-start candidate event={} serial={} input_direction={} attack_direction={}",
-            event, attackSegmentSerial, static_cast<int>(input), static_cast<int>(attackDirection.Value()));
         Publish();
     }
 
     void UpdateAttackDirection(DW::Direction input, Clock::time_point now)
     {
-        if (!attackDirection.Update(input, now)) return;
-        spdlog::info("attack-direction update serial={} input_direction={} attack_direction={}",
-            attackSegmentSerial, static_cast<int>(input), static_cast<int>(attackDirection.Value()));
+        attackDirection.Update(input, now);
     }
 
-    void EndAttackSegment(std::string_view event)
+    void EndAttackSegment()
     {
         if (!attackDirection.Active()) return;
         attackDirection.End();
-        spdlog::info("segment-end event={} serial={}", event, attackSegmentSerial);
         Publish();
+    }
+
+    void ReconcileAttackDirectionLifecycle()
+    {
+        if (!attackDirection.Active()) return;
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        bool graphAttacking = true;
+        if (player && player->GetGraphVariableBool("IsAttacking", graphAttacking) && !graphAttacking) {
+            attackDirection.End();
+            Publish();
+        }
     }
 
     void QueuePublish()
@@ -484,11 +541,11 @@ private:
         }
     }
 
-    void Reset(const char* reason)
+    void Reset(const char* reason, bool resetAttackDirection = true)
     {
         const bool hadInput = state.Value() != DW::Direction::None || state.device != DW::Device::None;
         state.Reset();
-        attackDirection.End();
+        if (resetAttackDirection) attackDirection.End();
         Publish();
         if (hadInput) spdlog::info("reset={} device=none raw_x=0 raw_y=0 direction=0", reason);
     }
@@ -546,7 +603,6 @@ private:
 
     DW::InputState state;
     DW::AttackDirectionState attackDirection;
-    std::uint32_t attackSegmentSerial{0};
     std::atomic_bool publishQueued{false}, focusResetQueued{false}, focusInstallQueued{false},
         focusWarningLogged{false};
     HWND focusWindow{nullptr};
@@ -573,7 +629,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message)
 }
 
 SKSEPluginInfo(
-    .Version = {0, 2, 0, 0},
+    .Version = {0, 3, 0, 0},
     .Name = "DawnwalkerCombat",
     .Author = "moiian",
     .RuntimeCompatibility = SKSE::PluginDeclaration::RuntimeCompatibility{TargetRuntime}
@@ -595,9 +651,12 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
             return false;
         }
         SKSE::Init(skse);
+        const auto attackDirectionWindow = LoadAttackDirectionWindow();
+        Controller::Get().SetAttackDirectionWindow(attackDirectionWindow);
         SKSE::AllocTrampoline(14);
         if (!SKSE::GetTaskInterface() || !SKSE::GetMessagingInterface()->RegisterListener(OnMessage)) return false;
-        spdlog::info("DawnwalkerCombat 0.2.0 loaded for Skyrim 1.6.1170; raw axes are engine-normalized before DW deadzone, not physical ADC values");
+        spdlog::info("attack direction update window={}ms", attackDirectionWindow.count());
+        spdlog::info("DawnwalkerCombat 0.3.0 loaded for Skyrim 1.6.1170; raw axes are engine-normalized before DW deadzone, not physical ADC values");
         return true;
     } catch (const std::exception&) {
         return false;

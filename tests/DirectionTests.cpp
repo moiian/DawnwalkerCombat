@@ -70,6 +70,11 @@ int main()
     Check(attack.Value() == None, "new neutral segment does not inherit direction");
     Check(attack.Update(Up, start + std::chrono::milliseconds{1100}) && attack.Value() == Up,
         "neutral segment accepts direction in window");
+    attack.End();
+    attack.SetUpdateWindow(std::chrono::milliseconds{0});
+    attack.Begin(Left, start + std::chrono::seconds{2});
+    Check(!attack.Update(Right, start + std::chrono::seconds{2}) && attack.Value() == Left,
+        "zero window keeps snapshot only");
     for (int deg = 0; deg < 360; ++deg) {
         const float a = deg * 3.14159265F / 180;
         const auto v = InputState::Classify(std::cos(a), std::sin(a), None);
