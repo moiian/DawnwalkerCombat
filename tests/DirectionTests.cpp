@@ -7,6 +7,7 @@
 using DW::Direction;
 using DW::InputState;
 using DW::AttackDirectionState;
+using DW::MapAttackDirection;
 int checks = 0;
 void Check(bool ok, const char* label)
 {
@@ -53,6 +54,28 @@ int main()
     Check(s.Value() == None, "NaN rejected");
     s.Stick(0, std::numeric_limits<float>::infinity());
     Check(s.Value() == None, "infinite rejected");
+
+    Check(MapAttackDirection(None, false, false) == None, "attack mapping preserves neutral");
+    Check(MapAttackDirection(Left, false, false) == Left &&
+          MapAttackDirection(Right, false, false) == Right &&
+          MapAttackDirection(Up, false, false) == Up &&
+          MapAttackDirection(Down, false, false) == Down,
+        "default attack mapping preserves all directions");
+    Check(MapAttackDirection(Left, true, false) == Right &&
+          MapAttackDirection(Right, true, false) == Left &&
+          MapAttackDirection(Up, true, false) == Up &&
+          MapAttackDirection(Down, true, false) == Down,
+        "horizontal attack mapping swaps only left right");
+    Check(MapAttackDirection(Left, false, true) == Left &&
+          MapAttackDirection(Right, false, true) == Right &&
+          MapAttackDirection(Up, false, true) == Down &&
+          MapAttackDirection(Down, false, true) == Up,
+        "vertical attack mapping swaps only up down");
+    Check(MapAttackDirection(Left, true, true) == Right &&
+          MapAttackDirection(Right, true, true) == Left &&
+          MapAttackDirection(Up, true, true) == Down &&
+          MapAttackDirection(Down, true, true) == Up,
+        "combined attack mapping swaps both axes");
 
     AttackDirectionState attack;
     const auto start = std::chrono::steady_clock::time_point{};

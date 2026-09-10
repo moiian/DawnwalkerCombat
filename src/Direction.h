@@ -9,6 +9,21 @@ namespace DW
 enum class Direction : std::int32_t { None = 0, Up = 1, Right = 2, Down = 3, Left = 4 };
 enum class Device { None, Keyboard, Gamepad };
 
+// Maps real player input to the final attack-animation direction slot. This is
+// deliberately separate from InputState so DW_InputDirection always remains raw.
+[[nodiscard]] constexpr Direction MapAttackDirection(Direction a_input,
+    bool a_reverseHorizontal, bool a_reverseVertical)
+{
+    switch (a_input) {
+    case Direction::Left: return a_reverseHorizontal ? Direction::Right : Direction::Left;
+    case Direction::Right: return a_reverseHorizontal ? Direction::Left : Direction::Right;
+    case Direction::Up: return a_reverseVertical ? Direction::Down : Direction::Up;
+    case Direction::Down: return a_reverseVertical ? Direction::Up : Direction::Down;
+    case Direction::None: return Direction::None;
+    }
+    return Direction::None;
+}
+
 // Pure, engine-independent state machine. Tests exercise the same code as the DLL.
 class InputState
 {

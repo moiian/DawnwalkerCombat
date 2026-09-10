@@ -53,11 +53,11 @@ jobs:
           $dll = Get-Item dist/SKSE/Plugins/DawnwalkerCombat.dll
           if ($dll.Length -lt 10000) { throw 'Missing or empty DLL' }
           Copy-Item build/Release/DawnwalkerCombat.pdb dist/SKSE/Plugins/ -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist/* -DestinationPath DawnwalkerCombat-0.3.0-MO2.zip
+          Compress-Archive -Path dist/* -DestinationPath DawnwalkerCombat-0.3.1-MO2.zip
       - name: Upload installable archive
         uses: actions/upload-artifact@v4
         with:
-          name: DawnwalkerCombat-0.3.0-MO2
-          path: DawnwalkerCombat-0.3.0-MO2.zip
+          name: DawnwalkerCombat-0.3.1-MO2
+          path: DawnwalkerCombat-0.3.1-MO2.zip
           if-no-files-found: error
           retention-days: 30

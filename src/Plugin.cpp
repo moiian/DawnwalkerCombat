@@ -25,6 +25,13 @@ constexpr UINT_PTR FocusSubclassId = 0x44574301; // "DWC" + implementation revis
 using Clock = std::chrono::steady_clock;
 constexpr std::string_view AttackDirectionIniPath = "Data/SKSE/Plugins/DawnwalkerCombat.ini";
 
+struct AttackDirectionConfig
+{
+    std::chrono::milliseconds updateWindow{DW::AttackDirectionState::kDefaultAttackDirectionWindow};
+    bool reverseHorizontalInput{false};
+    bool reverseVerticalInput{false};
+};
+
 std::string_view Trim(std::string_view value)
 {
     while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.remove_prefix(1);
@@ -32,10 +39,24 @@ std::string_view Trim(std::string_view value)
     return value;
 }
 
-std::chrono::milliseconds LoadAttackDirectionWindow()
+bool ParseBoolean(std::string_view value, bool& output)
 {
+    if (value == "true") {
+        output = true;
+        return true;
+    }
+    if (value == "false") {
+        output = false;
+        return true;
+    }
+    return false;
+}
+
+AttackDirectionConfig LoadAttackDirectionConfig()
+{
+    AttackDirectionConfig config;
     std::ifstream file{AttackDirectionIniPath.data()};
-    if (!file) return DW::AttackDirectionState::kDefaultAttackDirectionWindow;
+    if (!file) return config;
 
     bool attackDirectionSection = false;
     std::string line;
@@ -48,19 +69,32 @@ std::chrono::milliseconds LoadAttackDirectionWindow()
         }
         if (!attackDirectionSection) continue;
         const auto separator = value.find('=');
-        if (separator == std::string_view::npos || Trim(value.substr(0, separator)) != "UpdateWindowMs") continue;
+        if (separator == std::string_view::npos) continue;
 
+        const auto key = Trim(value.substr(0, separator));
         const auto configured = Trim(value.substr(separator + 1));
-        std::uint32_t milliseconds = 0;
-        const auto [end, error] = std::from_chars(configured.data(), configured.data() + configured.size(), milliseconds);
-        if (error == std::errc{} && end == configured.data() + configured.size()) {
-            return std::chrono::milliseconds{milliseconds};
+        if (key == "UpdateWindowMs") {
+            std::uint32_t milliseconds = 0;
+            const auto [end, error] = std::from_chars(configured.data(), configured.data() + configured.size(), milliseconds);
+            if (error == std::errc{} && end == configured.data() + configured.size()) {
+                config.updateWindow = std::chrono::milliseconds{milliseconds};
+            } else {
+                spdlog::warn("invalid {} UpdateWindowMs; using default {}ms", AttackDirectionIniPath,
+                    DW::AttackDirectionState::kDefaultAttackDirectionWindow.count());
+            }
+        } else if (key == "ReverseHorizontalInput") {
+            if (!ParseBoolean(configured, config.reverseHorizontalInput)) {
+                spdlog::warn("invalid {} ReverseHorizontalInput; using default false", AttackDirectionIniPath);
+                config.reverseHorizontalInput = false;
+            }
+        } else if (key == "ReverseVerticalInput") {
+            if (!ParseBoolean(configured, config.reverseVerticalInput)) {
+                spdlog::warn("invalid {} ReverseVerticalInput; using default false", AttackDirectionIniPath);
+                config.reverseVerticalInput = false;
+            }
         }
-        spdlog::warn("invalid {} UpdateWindowMs; using default {}ms", AttackDirectionIniPath,
-            DW::AttackDirectionState::kDefaultAttackDirectionWindow.count());
-        return DW::AttackDirectionState::kDefaultAttackDirectionWindow;
     }
-    return DW::AttackDirectionState::kDefaultAttackDirectionWindow;
+    return config;
 }
 
 HWND FindSkyrimWindow()
@@ -281,9 +315,11 @@ public:
             DW::InputState::Deadzone, DW::InputState::AxisRatio);
     }
 
-    void SetAttackDirectionWindow(std::chrono::milliseconds window)
+    void SetAttackDirectionConfig(const AttackDirectionConfig& config)
     {
-        attackDirection.SetUpdateWindow(window);
+        attackDirection.SetUpdateWindow(config.updateWindow);
+        reverseHorizontalInput = config.reverseHorizontalInput;
+        reverseVerticalInput = config.reverseVerticalInput;
     }
 
     void StartRuntime()
@@ -418,13 +454,18 @@ private:
     void BeginAttackSegment()
     {
         const auto input = state.Value();
-        attackDirection.Begin(input, Clock::now());
+        attackDirection.Begin(MapAttackDirection(input), Clock::now());
         Publish();
     }
 
     void UpdateAttackDirection(DW::Direction input, Clock::time_point now)
     {
-        attackDirection.Update(input, now);
+        if (input != DW::Direction::None) attackDirection.Update(MapAttackDirection(input), now);
+    }
+
+    [[nodiscard]] DW::Direction MapAttackDirection(DW::Direction input) const
+    {
+        return DW::MapAttackDirection(input, reverseHorizontalInput, reverseVerticalInput);
     }
 
     void EndAttackSegment()
@@ -603,6 +644,7 @@ private:
 
     DW::InputState state;
     DW::AttackDirectionState attackDirection;
+    bool reverseHorizontalInput{false}, reverseVerticalInput{false};
     std::atomic_bool publishQueued{false}, focusResetQueued{false}, focusInstallQueued{false},
         focusWarningLogged{false};
     HWND focusWindow{nullptr};
@@ -651,12 +693,14 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
             return false;
         }
         SKSE::Init(skse);
-        const auto attackDirectionWindow = LoadAttackDirectionWindow();
-        Controller::Get().SetAttackDirectionWindow(attackDirectionWindow);
+        const auto attackDirectionConfig = LoadAttackDirectionConfig();
+        Controller::Get().SetAttackDirectionConfig(attackDirectionConfig);
         SKSE::AllocTrampoline(14);
         if (!SKSE::GetTaskInterface() || !SKSE::GetMessagingInterface()->RegisterListener(OnMessage)) return false;
-        spdlog::info("attack direction update window={}ms", attackDirectionWindow.count());
-        spdlog::info("DawnwalkerCombat 0.3.0 loaded for Skyrim 1.6.1170; raw axes are engine-normalized before DW deadzone, not physical ADC values");
+        spdlog::info("attack direction update window={}ms reverse_horizontal_input={} reverse_vertical_input={}",
+            attackDirectionConfig.updateWindow.count(), attackDirectionConfig.reverseHorizontalInput,
+            attackDirectionConfig.reverseVerticalInput);
+        spdlog::info("DawnwalkerCombat 0.3.1 loaded for Skyrim 1.6.1170; raw axes are engine-normalized before DW deadzone, not physical ADC values");
         return true;
     } catch (const std::exception&) {
         return false;

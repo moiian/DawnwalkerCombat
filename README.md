@@ -1,4 +1,4 @@
-# DawnwalkerCombat — milestones 1–3 (0.3.0)
+# DawnwalkerCombat — milestones 1–3.1 (0.3.1)
 
 Private SKSE input-direction prototype for **Skyrim SE/AE Steam 1.6.1170**.
 This is an input/animation-variable prototype with a minimal player-blocking
@@ -82,9 +82,14 @@ A DLL alone cannot create an arbitrary new graph variable through
   clear the active state and set `DW_AttackDirection` to 0. A subsequent
   `BFCO_PlayerAttackStart` always reinitializes the segment even if an end event
   did not arrive, so BFCO combo stages do not share a window or direction.
-- `Data/SKSE/Plugins/DawnwalkerCombat.ini` is read once during plugin startup:
-  `UpdateWindowMs=200` is the default; an absent or invalid value uses 200, and
-  `0` makes each attack a snapshot only. There is no hot reload.
+- `Data/SKSE/Plugins/DawnwalkerCombat.ini` is read once during plugin startup.
+  `[AttackDirection]` defaults are `UpdateWindowMs=200`,
+  `ReverseHorizontalInput=false`, and `ReverseVerticalInput=false`; absent or
+  invalid values safely retain those defaults, and `UpdateWindowMs=0` makes each
+  attack a snapshot only. There is no hot reload. The reverse options map only
+  the value written to `DW_AttackDirection`: horizontal swaps Left/Right and
+  vertical swaps Up/Down. `DW_InputDirection` and all Guard OAR conditions
+  always retain the real input direction.
 - Event-driven stale reconciliation checks `IsAttacking` on graph events,
   direction changes, and menu close. If a locally active segment has already
   left `IsAttacking`, it clears `DW_AttackDirection`. Opening a menu clears the
@@ -107,9 +112,9 @@ No behavior regeneration is required for this BDI variable.
 
 Push to `main` or open **Actions → Windows DLL → Run workflow**. Windows Server
 2022 builds an x64 Release DLL, runs the shared C++ direction tests and packages
-the mod. Download the **DawnwalkerCombat-0.3.0-MO2** artifact from the successful
+the mod. Download the **DawnwalkerCombat-0.3.1-MO2** artifact from the successful
 run, extract GitHub's outer artifact ZIP, then install the inner
-`DawnwalkerCombat-0.3.0-MO2.zip` in MO2.
+`DawnwalkerCombat-0.3.1-MO2.zip` in MO2.
 
 The CMake preset requires CMake 3.28+, consumes CommonLibSSE-NG tag v3.7.0 and vcpkg tag 2023.10.19,
 with a static MSVC runtime. The repository contains no game files or credentials.
@@ -157,9 +162,12 @@ prepared OAR config overlay only after verifying the graph variable in game.
    sees a frozen value afterwards. Preserve all other conditions, priority and
    blend settings.
 9. Confirm `UpdateWindowMs=0` snapshots only, a nonzero value allows a late
-   direction change only inside that duration, and an invalid value logs a
-   warning then uses 200. Test attack-to-block/interrupt and a menu resume to
-   confirm the graph variable is cleared only after `IsAttacking` becomes false.
+   direction change only inside that duration, and invalid settings log a warning
+   then use their defaults. With both reverse options false, all four attack
+   directions must match the input. Enable each option independently to swap only
+   its axis, then enable both to swap both axes; Guard direction must not change.
+   Test attack-to-block/interrupt and a menu resume to confirm the graph variable
+   is cleared only after `IsAttacking` becomes false.
 
 The first game run, controller mapping, window-focus reset, and actual OAR
 transition timing must be validated on the user's mod stack. Cloud CI cannot
